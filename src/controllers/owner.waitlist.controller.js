@@ -51,7 +51,8 @@ const getAvailableTables = async (req, res) => {
 const assignTables = async (req, res) => {
   try {
     const waitlist = await waitlistService.assignTables(req.user._id, req.params.id, req.body.tableIds || []);
-    waitlistNotifications.notifyWaitlistUpdated(req.app.get('io'), waitlist, 'tables_assigned');
+    waitlistNotifications.notifyWaitlistUpdated(req.app.get('io'), waitlist, 'tables_assigned')
+      .catch((err) => console.error('[OwnerWaitlist] notifyWaitlistUpdated failed:', err.message));
 
     return res.json({
       success: true,
@@ -71,7 +72,8 @@ const confirmWaitlist = async (req, res) => {
       req.body.tableIds || [],
       req.body.ownerNote
     );
-    waitlistNotifications.notifyWaitlistConfirmed(req.app.get('io'), data.waitlist, data.booking);
+    waitlistNotifications.notifyWaitlistConfirmed(req.app.get('io'), data.waitlist, data.booking)
+      .catch((err) => console.error('[OwnerWaitlist] notifyWaitlistConfirmed failed:', err.message));
 
     return res.json({
       success: true,
@@ -90,7 +92,8 @@ const cancelWaitlist = async (req, res) => {
       req.params.id,
       req.body.reason
     );
-    waitlistNotifications.notifyWaitlistCancelled(req.app.get('io'), waitlist);
+    waitlistNotifications.notifyWaitlistCancelled(req.app.get('io'), waitlist)
+      .catch((err) => console.error('[OwnerWaitlist] notifyWaitlistCancelled failed:', err.message));
 
     return res.json({
       success: true,
@@ -109,7 +112,8 @@ const expireWaitlist = async (req, res) => {
       req.params.id,
       req.body.reason
     );
-    waitlistNotifications.notifyWaitlistExpired(req.app.get('io'), waitlist);
+    waitlistNotifications.notifyWaitlistExpired(req.app.get('io'), waitlist)
+      .catch((err) => console.error('[OwnerWaitlist] notifyWaitlistExpired failed:', err.message));
 
     return res.json({
       success: true,
@@ -129,7 +133,8 @@ const updatePriority = async (req, res) => {
       req.body.priorityNumber,
       req.body.reason
     );
-    waitlistNotifications.notifyWaitlistUpdated(req.app.get('io'), waitlist, 'priority_updated');
+    waitlistNotifications.notifyWaitlistUpdated(req.app.get('io'), waitlist, 'priority_updated')
+      .catch((err) => console.error('[OwnerWaitlist] notifyWaitlistUpdated failed:', err.message));
 
     return res.json({
       success: true,

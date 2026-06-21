@@ -15,7 +15,8 @@ const handleError = (res, error, fallbackMessage) => {
 const createWaitlist = async (req, res) => {
   try {
     const waitlist = await waitlistService.createWaitlist(req.user._id, req.body);
-    waitlistNotifications.notifyWaitlistCreated(req.app.get('io'), waitlist);
+    waitlistNotifications.notifyWaitlistCreated(req.app.get('io'), waitlist)
+      .catch((err) => console.error('[Waitlist] notifyWaitlistCreated failed:', err.message));
 
     return res.status(201).json({
       success: true,
@@ -48,7 +49,8 @@ const getWaitlistById = async (req, res) => {
 const updateWaitlist = async (req, res) => {
   try {
     const waitlist = await waitlistService.updateCustomerWaitlist(req.params.id, req.user._id, req.body);
-    waitlistNotifications.notifyWaitlistUpdated(req.app.get('io'), waitlist, 'customer_updated');
+    waitlistNotifications.notifyWaitlistUpdated(req.app.get('io'), waitlist, 'customer_updated')
+      .catch((err) => console.error('[Waitlist] notifyWaitlistUpdated failed:', err.message));
 
     return res.json({
       success: true,
@@ -67,7 +69,8 @@ const cancelWaitlist = async (req, res) => {
       req.user._id,
       req.body.reason
     );
-    waitlistNotifications.notifyWaitlistCancelled(req.app.get('io'), waitlist);
+    waitlistNotifications.notifyWaitlistCancelled(req.app.get('io'), waitlist)
+      .catch((err) => console.error('[Waitlist] notifyWaitlistCancelled failed:', err.message));
 
     return res.json({
       success: true,

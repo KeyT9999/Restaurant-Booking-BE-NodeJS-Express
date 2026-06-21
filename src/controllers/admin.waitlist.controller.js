@@ -49,11 +49,14 @@ const updateWaitlistStatus = async (req, res) => {
     );
 
     if (waitlist.status === 'cancelled') {
-      waitlistNotifications.notifyWaitlistCancelled(req.app.get('io'), waitlist);
+      waitlistNotifications.notifyWaitlistCancelled(req.app.get('io'), waitlist)
+        .catch((err) => console.error('[AdminWaitlist] notifyWaitlistCancelled failed:', err.message));
     } else if (waitlist.status === 'expired') {
-      waitlistNotifications.notifyWaitlistExpired(req.app.get('io'), waitlist);
+      waitlistNotifications.notifyWaitlistExpired(req.app.get('io'), waitlist)
+        .catch((err) => console.error('[AdminWaitlist] notifyWaitlistExpired failed:', err.message));
     } else {
-      waitlistNotifications.notifyWaitlistUpdated(req.app.get('io'), waitlist, 'admin_status_updated');
+      waitlistNotifications.notifyWaitlistUpdated(req.app.get('io'), waitlist, 'admin_status_updated')
+        .catch((err) => console.error('[AdminWaitlist] notifyWaitlistUpdated failed:', err.message));
     }
 
     return res.json({
