@@ -85,6 +85,16 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    // ─── No-show Penalty ───
+    noShowCounter: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    bookingBlockedUntil: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true, // tự tạo createdAt, updatedAt
@@ -116,6 +126,8 @@ userSchema.methods.toPublicJSON = function () {
     emailVerified: this.emailVerified,
     active: this.active,
     lastLogin: this.lastLogin,
+    noShowCounter: this.noShowCounter,
+    bookingBlockedUntil: this.bookingBlockedUntil,
     createdAt: this.createdAt,
     updatedAt: this.updatedAt,
   };

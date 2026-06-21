@@ -49,6 +49,7 @@ const createBookingLegacy = async (req, res) => {
       occasion,
       tableNumbers,
       voucherCode,
+      preOrderItems,
     } = req.body;
 
     // 1. Kiểm tra nhà hàng
@@ -61,7 +62,18 @@ const createBookingLegacy = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Nhà hàng hiện đang ngưng hoạt động hoặc chưa được duyệt' });
     }
 
-    // 2. Validate booking time (giờ hoạt động, thời gian đặt trước)
+    // 2. Kiểm tra user có bị block do no-show không
+    const blockCheck = await bookingService.checkUserBookingBlock(customerId);
+    if (blockCheck.blocked) {
+      return res.status(403).json({
+        success: false,
+        message: blockCheck.message,
+        errorCode: 'NO_SHOW_BLOCKED',
+        blockedUntil: blockCheck.blockedUntil,
+      });
+    }
+
+    // 3. Validate booking time (giờ hoạt động, thời gian đặt trước)
     const timeValidation = await bookingService.validateBookingTime(bookingDate, bookingTime, restaurant);
     if (!timeValidation.valid) {
       return res.status(400).json({ success: false, message: 'Thời gian đặt bàn không hợp lệ', errors: timeValidation.errors });
@@ -144,7 +156,7 @@ const createBookingLegacy = async (req, res) => {
       }
     }
 
-    // 6. Tạo booking document
+    // 6. Tạo booking document (chưa save)
     const normalizedDate = bookingService.normalizeDate(bookingDate);
     const booking = new Booking({
       customerId,
@@ -161,9 +173,15 @@ const createBookingLegacy = async (req, res) => {
       depositAmount,
       discountAmount,
       voucherCode: voucherCode ? voucherCode.toUpperCase().trim() : null,
-      voucherId,
       originalAmount: depositAmount,
       finalAmount: Math.max(0, depositAmount - discountAmount),
+      preOrderItems: Array.isArray(preOrderItems) ? preOrderItems.map((item) => ({
+        menuItemId: item.menuItemId,
+        nameSnapshot: item.nameSnapshot || item.name,
+        priceSnapshot: item.priceSnapshot || item.price,
+        quantity: Math.max(1, item.quantity || 1),
+        note: item.note || null,
+      })) : [],
       status: 'pending',
       statusHistory: [
         {
@@ -173,6 +191,25 @@ const createBookingLegacy = async (req, res) => {
         },
       ],
     });
+
+    // 6.5 Atomic table reservation — prevents double-booking race condition
+    if (assignedTables.length > 0) {
+      const reservation = await bookingService.reserveTables(
+        restaurantId,
+        assignedTables,
+        bookingDate,
+        bookingTime,
+        booking._id
+      );
+      if (!reservation.success) {
+        return res.status(409).json({
+          success: false,
+          message: reservation.message,
+          errorCode: reservation.error,
+          tableNumber: reservation.tableNumber,
+        });
+      }
+    }
 
     await booking.save();
 
@@ -507,6 +544,9 @@ const cancelBooking = async (req, res) => {
 
     await booking.save();
 
+    // Release table reservations
+    bookingService.releaseTableReservations(booking._id).catch(() => {});
+
     // Reverse voucher redemption if any
     if (booking.voucherId) {
       try {
@@ -517,15 +557,19 @@ const cancelBooking = async (req, res) => {
       }
     }
 
-    // Gửi thông báo real-time qua Socket.io
-    const io = req.app.get('io');
     bookingCommissionService.markCancelledForBooking(
       booking._id,
       `Khách hàng huỷ booking trước khi phí trở thành khoản phải thu: ${booking.cancellationReason}`
     ).catch((error) => {
       console.warn(`[BookingCommission/customer-cancelled] ${error.message}`);
     });
+
     const restaurant = await Restaurant.findById(booking.restaurantId);
+    const refundService = require('../services/refund.service');
+    const refund = await refundService.autoRefund(booking, restaurant, req.user._id, 'customer');
+
+    // Gửi thông báo real-time qua Socket.io
+    const io = req.app.get('io');
     emitBookingEvent(io, `restaurant:${booking.restaurantId.toString()}`, 'booking:cancelled', {
       bookingId: booking._id,
       restaurantId: booking.restaurantId,
@@ -551,10 +595,61 @@ const cancelBooking = async (req, res) => {
     return res.json({
       success: true,
       message: 'Hủy đặt bàn thành công',
+      data: refund ? { refundAmount: refund.amount, refundId: refund._id } : { refundAmount: 0 },
     });
   } catch (error) {
     console.error('❌ [CancelBooking] Lỗi:', error.message);
     return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi hủy đặt bàn' });
+  }
+};
+
+/**
+ * F1. Hold Tables (POST /api/v1/bookings/hold-tables)
+ */
+const holdTables = async (req, res) => {
+  try {
+    const { restaurantId, bookingDate, bookingTime, tableNumbers } = req.body;
+    const userId = req.user?._id;
+
+    if (!restaurantId || !bookingDate || !bookingTime || !tableNumbers?.length) {
+      return res.status(400).json({ success: false, message: 'Thiếu thông tin giữ bàn' });
+    }
+
+    const result = await bookingService.holdTables({
+      restaurantId, tableNumbers, bookingDate, bookingTime,
+      userId: userId || null,
+      sessionId: userId ? undefined : (req.headers['x-session-id'] || null),
+    });
+
+    if (!result.success) {
+      return res.status(409).json({ success: false, message: result.message, conflictTables: result.conflictTables });
+    }
+
+    return res.json({ success: true, data: { expiresAt: result.expiresAt } });
+  } catch (error) {
+    console.error(' HoldTables Lỗi:', error.message);
+    return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi giữ bàn' });
+  }
+};
+
+/**
+ * F2. Release Holds (POST /api/v1/bookings/release-holds)
+ */
+const releaseHolds = async (req, res) => {
+  try {
+    const { restaurantId, bookingDate, bookingTime } = req.body;
+    const userId = req.user?._id;
+
+    await bookingService.releaseHolds({
+      restaurantId, bookingDate, bookingTime,
+      userId: userId || null,
+      sessionId: userId ? undefined : (req.headers['x-session-id'] || null),
+    });
+
+    return res.json({ success: true, message: 'Đã giải phóng giữ bàn' });
+  } catch (error) {
+    console.error(' ReleaseHolds Lỗi:', error.message);
+    return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi giải phóng giữ bàn' });
   }
 };
 
@@ -564,6 +659,7 @@ const cancelBooking = async (req, res) => {
 const checkAvailability = async (req, res) => {
   try {
     const { restaurantId, bookingDate, bookingTime, numberOfGuests } = req.body;
+    const userId = req.user?._id;
 
     if (!restaurantId || !bookingDate || !bookingTime || !numberOfGuests) {
       return res.status(400).json({
@@ -596,7 +692,8 @@ const checkAvailability = async (req, res) => {
       restaurantId,
       bookingDate,
       bookingTime,
-      numberOfGuests
+      numberOfGuests,
+      userId || undefined
     );
 
     return res.json({
@@ -609,6 +706,161 @@ const checkAvailability = async (req, res) => {
   }
 };
 
+/**
+ * G. Reschedule Booking (PUT /api/v1/bookings/:id/reschedule)
+ */
+const rescheduleBooking = async (req, res) => {
+  try {
+    const { newDate, newTime, newTableNumbers } = req.body;
+    const booking = req.booking;
+
+    if (!['pending', 'confirmed'].includes(booking.status)) {
+      return res.status(400).json({ success: false, message: 'Chỉ có thể đổi lịch khi đặt bàn đang chờ xác nhận hoặc đã xác nhận' });
+    }
+
+    if (new Date(booking.bookingDate) <= new Date()) {
+      return res.status(400).json({ success: false, message: 'Không thể đổi lịch cho đặt bàn đã qua' });
+    }
+
+    const restaurant = await Restaurant.findById(booking.restaurantId);
+
+    const timeValidation = await bookingService.validateBookingTime(newDate, newTime, restaurant);
+    if (!timeValidation.valid) {
+      return res.status(400).json({ success: false, message: 'Thời gian mới không hợp lệ', errors: timeValidation.errors });
+    }
+
+    // Determine which tables to use: new selection or existing ones
+    let targetTables = newTableNumbers || booking.tableNumbers || [];
+
+    if (targetTables.length > 0) {
+      const capacityValidation = await bookingService.validateTableCapacity(targetTables, booking.numberOfGuests, booking.restaurantId);
+      if (!capacityValidation.valid) {
+        return res.status(400).json({ success: false, message: 'Bàn mới không phù hợp', errors: capacityValidation.errors });
+      }
+    } else {
+      const availability = await bookingService.checkAvailability(booking.restaurantId, newDate, newTime, booking.numberOfGuests);
+      if (!availability.available) {
+        return res.status(400).json({ success: false, message: 'Hết bàn trống vào thời gian mới' });
+      }
+      targetTables = availability.suggestedTables.map(t => t.tableNumber);
+    }
+
+    // Release old reservations and create new ones
+    await bookingService.releaseTableReservations(booking._id);
+    const normalizedDate = bookingService.normalizeDate(newDate);
+
+    if (targetTables.length > 0) {
+      const reservation = await bookingService.reserveTables(
+        booking.restaurantId, targetTables, newDate, newTime, booking._id
+      );
+      if (!reservation.success) {
+        return res.status(409).json({ success: false, message: reservation.message, errorCode: reservation.error });
+      }
+    }
+
+    // Store old values for history
+    const oldDate = booking.bookingDate;
+    const oldTime = booking.bookingTime;
+
+    booking.bookingDate = normalizedDate;
+    booking.bookingTime = newTime;
+    booking.tableNumbers = targetTables;
+    booking.rescheduleHistory.push({
+      fromDate: oldDate,
+      fromTime: oldTime,
+      toDate: normalizedDate,
+      toTime: newTime,
+      rescheduledAt: new Date(),
+      rescheduledBy: req.user._id,
+    });
+
+    await booking.save();
+
+    // Notify restaurant
+    const io = req.app.get('io');
+    emitBookingEvent(io, `restaurant:${booking.restaurantId}`, 'booking:rescheduled', {
+      bookingId: booking._id,
+      restaurantId: booking.restaurantId,
+      oldDate, oldTime, newDate: normalizedDate, newTime,
+    });
+
+    return res.json({ success: true, message: 'Đổi lịch đặt bàn thành công', data: booking.toPublicJSON() });
+  } catch (error) {
+    console.error('❌ [RescheduleBooking] Lỗi:', error.message);
+    return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi đổi lịch đặt bàn' });
+  }
+};
+
+/**
+ * H. Update Pre-Order Items (PUT /api/v1/bookings/:id/pre-order)
+ */
+const updatePreOrder = async (req, res) => {
+  try {
+    const booking = req.booking;
+    const { items } = req.body;
+
+    if (!['pending', 'confirmed'].includes(booking.status)) {
+      return res.status(400).json({ success: false, message: 'Chỉ có thể đặt món cho đặt bàn đang chờ hoặc đã xác nhận' });
+    }
+
+    if (!Array.isArray(items)) {
+      return res.status(400).json({ success: false, message: 'Danh sách món không hợp lệ' });
+    }
+
+    booking.preOrderItems = items.map((item) => ({
+      menuItemId: item.menuItemId,
+      nameSnapshot: item.name,
+      priceSnapshot: item.price,
+      quantity: Math.max(1, item.quantity || 1),
+      note: item.note || null,
+    }));
+
+    await booking.save();
+
+    return res.json({ success: true, message: 'Cập nhật món đặt trước thành công', data: booking.toPublicJSON() });
+  } catch (error) {
+    console.error('❌ [UpdatePreOrder] Lỗi:', error.message);
+    return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi cập nhật món đặt trước' });
+  }
+};
+
+/**
+ * I. Check-in (PUT /api/v1/bookings/:id/checkin)
+ */
+const checkIn = async (req, res) => {
+  try {
+    const booking = req.booking;
+
+    if (booking.status !== 'confirmed') {
+      return res.status(400).json({ success: false, message: 'Chỉ có thể check-in khi đặt bàn đã được xác nhận' });
+    }
+
+    if (booking.checkedInAt) {
+      return res.status(400).json({ success: false, message: 'Đã check-in trước đó' });
+    }
+
+    booking.checkedInAt = new Date();
+    booking.statusHistory.push({
+      status: booking.status,
+      changedBy: req.user._id,
+      note: 'Khách hàng đã check-in tại quầy',
+    });
+
+    await booking.save();
+
+    const io = req.app.get('io');
+    emitBookingEvent(io, `restaurant:${booking.restaurantId}`, 'booking:checked-in', {
+      bookingId: booking._id,
+      restaurantId: booking.restaurantId,
+    });
+
+    return res.json({ success: true, message: 'Check-in thành công', data: booking.toPublicJSON() });
+  } catch (error) {
+    console.error('❌ [CheckIn] Lỗi:', error.message);
+    return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi check-in' });
+  }
+};
+
 module.exports = {
   createBooking,
   getMyBookings,
@@ -616,4 +868,9 @@ module.exports = {
   updateBooking,
   cancelBooking,
   checkAvailability,
+  rescheduleBooking,
+  holdTables,
+  releaseHolds,
+  updatePreOrder,
+  checkIn,
 };

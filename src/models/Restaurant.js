@@ -277,6 +277,14 @@ const restaurantSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+
+    // ─── Cancellation Policy ───
+    cancellationPolicy: {
+      fullRefundBeforeHours: { type: Number, default: 24 },
+      partialRefundBeforeHours: { type: Number, default: 2 },
+      partialRefundPercent: { type: Number, default: 50, min: 0, max: 100 },
+      cancellationFee: { type: Number, default: 0, min: 0 },
+    },
   },
   {
     timestamps: true,

@@ -152,6 +152,11 @@ server.listen(PORT, () => {
   const { startSubscriptionExpiryJob } = require('./src/services/subscription.service');
   startSubscriptionExpiryJob();
 
+  // Start booking cron jobs
+  const { startCronJobs, setSocketIO } = require('./src/cron');
+  setSocketIO(io);
+  startCronJobs();
+
   // Start waitlist expiry cron job
   const { startWaitlistExpiryJob } = require('./src/services/waitlist-expiry.service');
   startWaitlistExpiryJob(io);

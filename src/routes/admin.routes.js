@@ -45,6 +45,7 @@ router.get(   '/bookings',            adminBookingController.getBookings);
 router.get(   '/bookings/stats',      adminBookingController.getBookingStats);
 router.get(   '/bookings/:id',        adminBookingController.getBookingById);
 router.patch( '/bookings/:id/status', adminBookingController.updateBookingStatus);
+router.put(   '/bookings/:id/revert-no-show', adminBookingController.revertNoShow);
 
 // ─── Payments & Revenue Management ───
 const adminPaymentController = require('../controllers/admin.payment.controller');

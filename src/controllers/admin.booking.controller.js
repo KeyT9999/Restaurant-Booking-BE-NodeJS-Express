@@ -245,9 +245,68 @@ const getBookingStats = async (req, res) => {
   }
 };
 
+/**
+ * D. Revert No-Show (PUT /api/v1/admin/bookings/:id/revert-no-show)
+ * Admin-only: revert a no-show booking back to confirmed and adjust the user's no-show counter.
+ */
+const revertNoShow = async (req, res) => {
+  try {
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Không tìm thấy đặt bàn' });
+    }
+
+    if (booking.status !== 'no_show') {
+      return res.status(400).json({ success: false, message: 'Chỉ có thể revert đặt bàn có trạng thái no_show' });
+    }
+
+    const User = require('../models/User');
+
+    // Reduce the user's no-show counter
+    if (booking.customerId) {
+      const customer = await User.findById(booking.customerId);
+      if (customer && customer.noShowCounter > 0) {
+        customer.noShowCounter = Math.max(0, customer.noShowCounter - 1);
+        if (customer.noShowCounter < 3 && customer.bookingBlockedUntil) {
+          customer.bookingBlockedUntil = null;
+        }
+        await customer.save();
+      }
+    }
+
+    booking.status = 'confirmed';
+    booking.statusHistory.push({
+      status: 'confirmed',
+      changedBy: req.user._id,
+      note: `Admin revert no-show: ${req.body.reason || 'Khách đã đến nhưng chưa check-in'}`,
+    });
+
+    await booking.save();
+
+    // Notify restaurant
+    const io = req.app?.get?.('io');
+    if (io) {
+      io.to(`restaurant:${booking.restaurantId}`).emit('booking:reverted', {
+        bookingId: booking._id,
+        restaurantId: booking.restaurantId,
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Revert no-show thành công',
+      data: booking.toAdminJSON(),
+    });
+  } catch (error) {
+    console.error('❌ [Admin/RevertNoShow] Lỗi:', error.message);
+    return res.status(500).json({ success: false, message: 'Không thể revert no-show' });
+  }
+};
+
 module.exports = {
   getBookings,
   getBookingStats,
   getBookingById,
   updateBookingStatus,
+  revertNoShow,
 };

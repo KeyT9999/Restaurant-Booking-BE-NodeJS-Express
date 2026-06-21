@@ -212,6 +212,31 @@ const bookingSchema = new mongoose.Schema(
       default: false,
     },
 
+    // ─── Check-in ───
+    checkedInAt: {
+      type: Date,
+      default: null,
+    },
+
+    // ─── Pre-Order Items ───
+    preOrderItems: [{
+      menuItemId: { type: mongoose.Schema.Types.ObjectId, ref: 'MenuItem' },
+      nameSnapshot: { type: String },
+      priceSnapshot: { type: Number },
+      quantity: { type: Number, default: 1, min: 1 },
+      note: { type: String, default: null, trim: true },
+    }],
+
+    // ─── Reschedule History ───
+    rescheduleHistory: [{
+      fromDate: { type: Date },
+      fromTime: { type: String },
+      toDate: { type: Date },
+      toTime: { type: String },
+      rescheduledAt: { type: Date, default: Date.now },
+      rescheduledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    }],
+
     // ─── Reminder ───
     reminderSent: {
       type: Boolean,
@@ -231,6 +256,10 @@ const bookingSchema = new mongoose.Schema(
 bookingSchema.index({ bookingDate: 1, bookingTime: 1 });
 bookingSchema.index({ customerId: 1, status: 1 });
 bookingSchema.index({ restaurantId: 1, status: 1 });
+bookingSchema.index({ restaurantId: 1, bookingDate: 1, status: 1 });
+bookingSchema.index({ status: 1, bookingDate: 1 });
+bookingSchema.index({ customerPhone: 1, restaurantId: 1 });
+bookingSchema.index({ voucherId: 1 });
 bookingSchema.index({ createdAt: -1 });
 bookingSchema.index(
   { sourceAiPendingActionId: 1 },
@@ -288,6 +317,8 @@ bookingSchema.methods.toPublicJSON = function () {
     sourceWaitlistId: this.sourceWaitlistId,
     tableNumbers: this.tableNumbers,
     reviewed: this.reviewed,
+    checkedInAt: this.checkedInAt,
+    preOrderItems: this.preOrderItems,
     createdAt: this.createdAt,
     updatedAt: this.updatedAt,
   };

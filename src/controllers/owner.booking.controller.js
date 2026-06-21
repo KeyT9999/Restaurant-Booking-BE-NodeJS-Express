@@ -1,8 +1,11 @@
 'use strict';
 
 const Booking = require('../models/Booking');
+const User = require('../models/User');
 const Restaurant = require('../models/Restaurant');
 const RestaurantTable = require('../models/RestaurantTable');
+const RestaurantActivityLog = require('../models/RestaurantActivityLog');
+const CustomerTag = require('../models/CustomerTag');
 const bookingService = require('../services/booking.service');
 const emailService = require('../services/email.service');
 const notificationService = require('../services/notification.service');
@@ -21,8 +24,19 @@ const sendBookingEmail = (promise, label) => {
 
 const sendNotification = (promise, label) => {
   Promise.resolve(promise).catch((error) => {
-    console.warn(`[OwnerBookingNotification/${label}] ${error.message}`);
+    console.warn(`[BookingNotification/${label}] ${error.message}`);
   });
+};
+
+const logActivity = (restaurantId, action, performedBy, performedByRole, reason, metadata = {}) => {
+  RestaurantActivityLog.create({
+    restaurantId,
+    action,
+    performedBy,
+    performedByRole,
+    reason,
+    metadata,
+  }).catch((error) => console.warn(`[ActivityLog] ${error.message}`));
 };
 
 /**
@@ -141,6 +155,9 @@ const confirmBooking = async (req, res) => {
 
     await booking.save();
 
+    logActivity(booking.restaurantId, 'booking_confirmed', req.user._id, req.user.role,
+      'Nhà hàng xác nhận đặt bàn', { bookingId: booking._id, customerName: booking.customerName });
+
     // Gửi thông báo real-time qua Socket.io
     const io = req.app.get('io');
     emitBookingEvent(io, `user:${booking.customerId.toString()}`, 'booking:confirmed', {
@@ -217,6 +234,9 @@ const cancelBooking = async (req, res) => {
 
     await booking.save();
 
+    // Release table reservations
+    bookingService.releaseTableReservations(booking._id).catch(() => {});
+
     // Reverse voucher redemption if any
     if (booking.voucherId) {
       try {
@@ -226,6 +246,13 @@ const cancelBooking = async (req, res) => {
         console.error('❌ Lỗi hoàn nguyên voucher khi nhà hàng hủy đặt bàn:', reverseErr.message);
       }
     }
+
+    // Auto-refund if deposit was paid
+    const refundService = require('../services/refund.service');
+    await refundService.autoRefund(booking, req.restaurant, req.user._id, 'restaurant_owner');
+
+    logActivity(booking.restaurantId, 'booking_cancelled', req.user._id, req.user.role,
+      reason || 'Nhà hàng hủy đặt bàn', { bookingId: booking._id, customerName: booking.customerName });
 
     // Gửi thông báo real-time qua Socket.io
     const io = req.app.get('io');
@@ -306,6 +333,9 @@ const completeBooking = async (req, res) => {
 
     await booking.save();
 
+    logActivity(booking.restaurantId, 'booking_completed', req.user._id, req.user.role,
+      'Khách đã dùng bữa xong', { bookingId: booking._id, customerName: booking.customerName, actualGuestCount: booking.actualGuestCount });
+
     // Cập nhật statistics cho nhà hàng
     const restaurant = req.restaurant;
     await bookingCommissionService.createLedgerForBooking(booking._id, {
@@ -367,6 +397,22 @@ const markNoShow = async (req, res) => {
     });
 
     await booking.save();
+
+    logActivity(booking.restaurantId, 'booking_no_show', req.user._id, req.user.role,
+      'Khách hàng không đến', { bookingId: booking._id, customerName: booking.customerName });
+
+    // Release table reservations
+    bookingService.releaseTableReservations(booking._id).catch(() => {});
+
+    // Increment no-show counter and apply block if needed
+    const customer = await User.findById(booking.customerId);
+    if (customer) {
+      customer.noShowCounter = (customer.noShowCounter || 0) + 1;
+      if (customer.noShowCounter >= 3) {
+        customer.bookingBlockedUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      }
+      await customer.save();
+    }
 
     const io = req.app.get('io');
     emitBookingEvent(io, `user:${booking.customerId.toString()}`, 'booking:no_show', {
@@ -613,6 +659,473 @@ const getBookingStats = async (req, res) => {
   }
 };
 
+/**
+ * J. Export Booking CSV (GET /api/v1/owner/bookings/export)
+ */
+const exportBookings = async (req, res) => {
+  try {
+    const restaurantId = req.restaurant._id;
+    const { status, fromDate, toDate, search } = req.query;
+
+    const filter = { restaurantId };
+    if (status) filter.status = status;
+    if (fromDate || toDate) {
+      filter.bookingDate = {};
+      if (fromDate) filter.bookingDate.$gte = new Date(fromDate);
+      if (toDate) filter.bookingDate.$lte = new Date(toDate);
+    }
+    if (search) {
+      filter.$or = [
+        { customerName: { $regex: search, $options: 'i' } },
+        { customerPhone: { $regex: search, $options: 'i' } },
+        { customerEmail: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const bookings = await Booking.find(filter)
+      .sort({ bookingDate: -1, bookingTime: -1 })
+      .lean();
+
+    const headers = ['ID', 'Khách hàng', 'SĐT', 'Email', 'Ngày', 'Giờ', 'Số khách', 'Bàn', 'Trạng thái', 'Tiền cọc', 'Đã cọc', 'Giảm giá', 'Ghi chú', 'Ngày tạo'];
+    const rows = bookings.map((b) => [
+      b._id.toString().slice(-8),
+      b.customerName,
+      b.customerPhone,
+      b.customerEmail,
+      new Date(b.bookingDate).toLocaleDateString('vi-VN'),
+      b.bookingTime,
+      b.numberOfGuests,
+      (b.tableNumbers || []).join('; '),
+      b.status,
+      b.depositAmount || 0,
+      b.depositPaid ? 'Đã cọc' : 'Chưa',
+      b.discountAmount || 0,
+      (b.specialRequests || '').replace(/,/g, ';'),
+      new Date(b.createdAt).toLocaleDateString('vi-VN'),
+    ]);
+
+    const csvContent = [
+      headers.join(','),
+      ...rows.map((r) => r.map((v) => `"${v}"`).join(',')),
+    ].join('\n');
+
+    const filename = `bookings-${new Date().toISOString().slice(0, 10)}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.status(200).send('\uFEFF' + csvContent);
+  } catch (error) {
+    console.error('❌ [ExportBookings] Lỗi:', error.message);
+    return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi xuất CSV' });
+  }
+};
+
+/**
+ * L. Revenue Stats (GET /api/v1/owner/bookings/revenue-stats)
+ */
+const getRevenueStats = async (req, res) => {
+  try {
+    const { restaurantId, period } = req.query;
+
+    if (!restaurantId) {
+      return res.status(400).json({ success: false, message: 'Thiếu restaurantId' });
+    }
+
+    const restaurant = await Restaurant.findById(restaurantId);
+    if (!restaurant || restaurant.ownerId.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Bạn không có quyền xem thống kê nhà hàng này',
+      });
+    }
+
+    const filter = { restaurantId };
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+
+    if (period === 'today') {
+      filter.bookingDate = today;
+    } else if (period === 'week') {
+      const start = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+      filter.bookingDate = { $gte: start, $lte: today };
+    } else if (period === 'month') {
+      const start = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
+      filter.bookingDate = { $gte: start, $lte: today };
+    } else if (period === 'year') {
+      const start = new Date(today.getTime() - 365 * 24 * 60 * 60 * 1000);
+      filter.bookingDate = { $gte: start, $lte: today };
+    }
+
+    const bookings = await Booking.find(filter).lean();
+
+    let totalDeposits = 0;
+    let totalDiscount = 0;
+    let paidCount = 0;
+    let completedCount = 0;
+    let cancelledCount = 0;
+    let noShowCount = 0;
+    let totalGuests = 0;
+
+    bookings.forEach((b) => {
+      if (b.depositPaid) {
+        totalDeposits += (b.depositAmount || 0);
+        paidCount++;
+      }
+      totalDiscount += (b.discountAmount || 0);
+      if (b.status === 'completed') {
+        completedCount++;
+        totalGuests += (b.actualGuestCount || b.numberOfGuests || 0);
+      }
+      if (b.status === 'cancelled') cancelledCount++;
+      if (b.status === 'no_show') noShowCount++;
+    });
+
+    const totalBookings = bookings.length;
+
+    // Daily breakdown for charts (only for week/month/year periods)
+    let dailyBreakdown = null;
+    if (period && period !== 'today' && period !== 'all') {
+      const dailyMap = {};
+      bookings.forEach((b) => {
+        const key = new Date(b.bookingDate).toISOString().slice(0, 10);
+        if (!dailyMap[key]) {
+          dailyMap[key] = { date: key, deposits: 0, completed: 0, cancelled: 0, noShow: 0, bookings: 0 };
+        }
+        dailyMap[key].bookings++;
+        if (b.depositPaid) dailyMap[key].deposits += (b.depositAmount || 0);
+        if (b.status === 'completed') dailyMap[key].completed++;
+        if (b.status === 'cancelled') dailyMap[key].cancelled++;
+        if (b.status === 'no_show') dailyMap[key].noShow++;
+      });
+      dailyBreakdown = Object.values(dailyMap).sort((a, b) => a.date.localeCompare(b.date));
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        totalBookings,
+        totalDeposits,
+        totalDiscount,
+        avgDepositPerBooking: totalBookings > 0 ? (totalDeposits / totalBookings).toFixed(1) : 0,
+        avgDepositPerPaid: paidCount > 0 ? (totalDeposits / paidCount).toFixed(1) : 0,
+        paidBookingCount: paidCount,
+        paidRate: totalBookings > 0 ? ((paidCount / totalBookings) * 100).toFixed(1) : 0,
+        completedCount,
+        cancelledCount,
+        noShowCount,
+        completionRate: totalBookings > 0 ? ((completedCount / totalBookings) * 100).toFixed(1) : 0,
+        totalGuests,
+        dailyBreakdown,
+      },
+    });
+  } catch (error) {
+    console.error('❌ [GetRevenueStats] Lỗi:', error.message);
+    return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi lấy thống kê doanh thu' });
+  }
+};
+
+/**
+ * N. Bulk Cancel Booking (POST /api/v1/owner/bookings/bulk-cancel)
+ */
+const bulkCancelBooking = async (req, res) => {
+  try {
+    const { restaurantId, date, statusFilter, reason } = req.body;
+
+    if (!restaurantId) {
+      return res.status(400).json({ success: false, message: 'Thiếu restaurantId' });
+    }
+
+    const restaurant = await Restaurant.findById(restaurantId);
+    if (!restaurant || restaurant.ownerId.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ success: false, message: 'Bạn không có quyền hủy đặt bàn của nhà hàng này' });
+    }
+
+    if (!date) {
+      return res.status(400).json({ success: false, message: 'Thiếu ngày cần hủy' });
+    }
+
+    const cancelDate = new Date(date);
+    cancelDate.setUTCHours(0, 0, 0, 0);
+    const endDate = new Date(cancelDate);
+    endDate.setUTCHours(23, 59, 59, 999);
+
+    const filter = {
+      restaurantId,
+      bookingDate: { $gte: cancelDate, $lte: endDate },
+      status: { $in: ['pending', 'confirmed'] },
+    };
+    if (statusFilter) {
+      filter.status = statusFilter;
+    }
+
+    const bookings = await Booking.find(filter).limit(100);
+    if (bookings.length === 0) {
+      return res.status(404).json({ success: false, message: 'Không có đặt bàn nào cần hủy' });
+    }
+
+    const now = new Date();
+    const io = req.app.get('io');
+    let cancelledCount = 0;
+
+    for (const booking of bookings) {
+      booking.status = 'cancelled';
+      booking.cancellationReason = reason || 'Nhà hàng tạm đóng cửa / bảo trì';
+      booking.cancelledBy = 'restaurant';
+      booking.cancelledAt = now;
+      booking.statusHistory.push({
+        status: 'cancelled',
+        changedBy: req.user._id,
+        note: reason || 'Hủy hàng loạt bởi chủ nhà hàng',
+      });
+      await booking.save();
+
+      bookingService.releaseTableReservations(booking._id).catch(() => {});
+
+      logActivity(restaurantId, 'booking_cancelled', req.user._id, req.user.role,
+        reason || 'Hủy hàng loạt', { bookingId: booking._id, customerName: booking.customerName });
+
+      emitBookingEvent(io, `user:${booking.customerId?.toString()}`, 'booking:cancelled', {
+        bookingId: booking._id,
+        restaurantId,
+        reason: booking.cancellationReason,
+      });
+
+      if (booking.customerId) {
+        sendNotification(
+          notificationService.notifyBookingCancelled(io, { booking, restaurant, reason: booking.cancellationReason }),
+          'bulk-cancel'
+        );
+      }
+
+      cancelledCount++;
+    }
+
+    return res.json({
+      success: true,
+      message: `Đã hủy ${cancelledCount} đặt bàn thành công`,
+      data: { cancelledCount },
+    });
+  } catch (error) {
+    console.error('❌ [BulkCancelBooking] Lỗi:', error.message);
+    return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi hủy hàng loạt' });
+  }
+};
+
+/**
+ * M. Owner Create Booking (POST /api/v1/owner/bookings/create)
+ * Chủ nhà hàng tạo đặt bàn thủ công (khách gọi điện, walk-in, v.v.)
+ */
+const ownerCreateBooking = async (req, res) => {
+  try {
+    const {
+      restaurantId,
+      bookingDate,
+      bookingTime,
+      numberOfGuests,
+      customerName,
+      customerPhone,
+      customerEmail,
+      specialRequests,
+      occasion,
+      tableNumbers,
+      setConfirmed,
+    } = req.body;
+
+    // 1. Verify restaurant ownership
+    const restaurant = await Restaurant.findById(restaurantId);
+    if (!restaurant) {
+      return res.status(404).json({ success: false, message: 'Nhà hàng không tồn tại' });
+    }
+    if (restaurant.ownerId.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ success: false, message: 'Bạn không phải chủ nhà hàng này' });
+    }
+
+    // 2. Validate booking time
+    const timeValidation = await bookingService.validateBookingTime(bookingDate, bookingTime, restaurant);
+    if (!timeValidation.valid) {
+      return res.status(400).json({ success: false, message: 'Thời gian đặt không hợp lệ', errors: timeValidation.errors });
+    }
+
+    // 3. Resolve tables
+    let assignedTables = tableNumbers || [];
+    if (assignedTables.length > 0) {
+      const capacityValidation = await bookingService.validateTableCapacity(assignedTables, numberOfGuests, restaurantId);
+      if (!capacityValidation.valid) {
+        return res.status(400).json({ success: false, message: 'Bàn không hợp lệ', errors: capacityValidation.errors });
+      }
+    } else {
+      const availability = await bookingService.checkAvailability(restaurantId, bookingDate, bookingTime, numberOfGuests);
+      if (!availability.available) {
+        return res.status(400).json({ success: false, message: 'Hết bàn trống' });
+      }
+      assignedTables = availability.suggestedTables.map(t => t.tableNumber);
+    }
+
+    // 4. Calculate deposit
+    let depositAmount = 0;
+    if (assignedTables.length > 0) {
+      const tables = await RestaurantTable.find({ restaurantId, tableNumber: { $in: assignedTables } });
+      depositAmount = tables.reduce((sum, t) => sum + (t.depositAmount || 0), 0);
+    }
+
+    // 5. Create booking
+    const normalizedDate = bookingService.normalizeDate(bookingDate);
+    const booking = new Booking({
+      customerId: null,
+      restaurantId,
+      bookingDate: normalizedDate,
+      bookingTime,
+      numberOfGuests,
+      customerName,
+      customerPhone,
+      customerEmail,
+      specialRequests: specialRequests || null,
+      occasion: occasion || null,
+      tableNumbers: assignedTables,
+      depositAmount,
+      discountAmount: 0,
+      status: setConfirmed ? 'confirmed' : 'pending',
+      statusHistory: [{
+        status: setConfirmed ? 'confirmed' : 'pending',
+        changedBy: req.user._id,
+        note: `Được tạo bởi chủ nhà hàng ${req.user.name || req.user._id}`,
+      }],
+    });
+
+    // 6. Atomic table reservation
+    if (assignedTables.length > 0) {
+      const reservation = await bookingService.reserveTables(restaurantId, assignedTables, bookingDate, bookingTime, booking._id);
+      if (!reservation.success) {
+        return res.status(409).json({ success: false, message: reservation.message, errorCode: reservation.error });
+      }
+    }
+
+    await booking.save();
+
+    // 7. Log activity & notify
+    logActivity(restaurantId, 'booking_created', req.user._id, req.user.role,
+      `Tạo đặt bàn thủ công cho ${customerName}`, {
+        bookingId: booking._id,
+        customerName,
+        setConfirmed: !!setConfirmed,
+      });
+
+    const io = req.app.get('io');
+    emitBookingEvent(io, `restaurant:${restaurantId}`, 'booking:created', {
+      bookingId: booking._id,
+      restaurantId,
+      status: booking.status,
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: `Tạo đặt bàn thủ công thành công (${setConfirmed ? 'đã xác nhận' : 'chờ xác nhận'})`,
+      data: booking.toPublicJSON(),
+    });
+  } catch (error) {
+    console.error('❌ [OwnerCreateBooking] Lỗi:', error.message);
+    return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi tạo đặt bàn thủ công' });
+  }
+};
+
+/**
+ * O. Customer History (GET /api/v1/owner/bookings/customer-history/:phone)
+ */
+const getCustomerHistory = async (req, res) => {
+  try {
+    const restaurantId = req.restaurant._id;
+    const { phone } = req.params;
+
+    if (!phone) {
+      return res.status(400).json({ success: false, message: 'Thiếu số điện thoại khách hàng' });
+    }
+
+    const bookings = await Booking.find({ restaurantId, customerPhone: phone })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+
+    const tags = await CustomerTag.find({ restaurantId, customerPhone: phone }).lean();
+
+    const totalSpent = bookings
+      .filter((b) => b.status === 'completed' && b.depositPaid)
+      .reduce((sum, b) => sum + (b.depositAmount || 0), 0);
+
+    return res.json({
+      success: true,
+      data: {
+        customerName: bookings[0]?.customerName || null,
+        customerPhone: phone,
+        customerEmail: bookings[0]?.customerEmail || null,
+        totalBookings: bookings.length,
+        completedBookings: bookings.filter((b) => b.status === 'completed').length,
+        cancelledBookings: bookings.filter((b) => b.status === 'cancelled').length,
+        noShowCount: bookings.filter((b) => b.status === 'no_show').length,
+        totalSpent,
+        lastVisit: bookings[0]?.bookingDate || null,
+        tags: tags.map((t) => t.tag),
+        bookings,
+      },
+    });
+  } catch (error) {
+    console.error('❌ [GetCustomerHistory] Lỗi:', error.message);
+    return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi lấy lịch sử khách hàng' });
+  }
+};
+
+/**
+ * P. Add Customer Tag (POST /api/v1/owner/bookings/customer-tag)
+ */
+const addCustomerTag = async (req, res) => {
+  try {
+    const restaurantId = req.restaurant._id;
+    const { customerPhone, customerId, tag } = req.body;
+
+    if (!customerPhone || !tag) {
+      return res.status(400).json({ success: false, message: 'Thiếu số điện thoại hoặc tag' });
+    }
+
+    const validTags = ['VIP', 'regular', 'tipper', 'complain', 'no_show_risk', 'frequent', 'new'];
+    if (!validTags.includes(tag)) {
+      return res.status(400).json({ success: false, message: `Tag không hợp lệ. Cho phép: ${validTags.join(', ')}` });
+    }
+
+    const existing = await CustomerTag.findOne({ restaurantId, customerPhone, tag });
+    if (existing) {
+      return res.status(409).json({ success: false, message: 'Tag này đã tồn tại' });
+    }
+
+    const customerTag = await CustomerTag.create({
+      restaurantId,
+      customerPhone,
+      customerId: customerId || null,
+      tag,
+      createdBy: req.user._id,
+    });
+
+    return res.status(201).json({ success: true, data: customerTag });
+  } catch (error) {
+    console.error('❌ [AddCustomerTag] Lỗi:', error.message);
+    return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi thêm tag' });
+  }
+};
+
+/**
+ * Q. Remove Customer Tag (DELETE /api/v1/owner/bookings/customer-tag/:id)
+ */
+const removeCustomerTag = async (req, res) => {
+  try {
+    const tag = await CustomerTag.findById(req.params.id);
+    if (!tag) {
+      return res.status(404).json({ success: false, message: 'Tag không tồn tại' });
+    }
+    await CustomerTag.deleteOne({ _id: tag._id });
+    return res.json({ success: true, message: 'Xóa tag thành công' });
+  } catch (error) {
+    console.error('❌ [RemoveCustomerTag] Lỗi:', error.message);
+    return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi xóa tag' });
+  }
+};
+
 module.exports = {
   getRestaurantBookings,
   getBookingDetail,
@@ -625,4 +1138,11 @@ module.exports = {
   addInternalNote,
   deleteInternalNote,
   getBookingStats,
+  exportBookings,
+  getRevenueStats,
+  ownerCreateBooking,
+  bulkCancelBooking,
+  getCustomerHistory,
+  addCustomerTag,
+  removeCustomerTag,
 };
