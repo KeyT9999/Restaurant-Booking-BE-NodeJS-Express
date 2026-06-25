@@ -92,4 +92,7 @@ router.get(   '/reviews/reported',     adminReviewController.getReportedReviews)
 router.put(   '/reviews/:id/hide',     adminReviewController.hideReview);
 router.put(   '/reviews/:id/restore',  adminReviewController.restoreReview);
 
+// ─── Recommendation Monitoring ───
+router.use('/recommendations', require('./admin.recommendation.routes'));
+
 module.exports = router;

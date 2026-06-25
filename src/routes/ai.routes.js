@@ -1,6 +1,6 @@
 'use strict';
 
-const { randomUUID } = require('node:crypto');
+const { randomUUID, createHash } = require('node:crypto');
 const express = require('express');
 const { getAiConfig } = require('../config/ai.config');
 const aiController = require('../controllers/ai.controller');
@@ -59,6 +59,14 @@ const createAiRateLimiter = ({
         errorCode: 'RATE_LIMITED',
       };
       observability.recordRateLimitHit({ role: actor.role });
+
+      // Safe logging of rate limit hit
+      const rawId = actor.userId ? String(actor.userId) : (req.ip || req.socket?.remoteAddress || 'unknown');
+      const identityHash = createHash('sha256').update(rawId).digest('hex');
+      console.warn(
+        `[AI_RATE_LIMIT] requestId=${req.aiRequestId} identityHash=${identityHash} endpoint=${req.originalUrl || req.path} code=AI_RATE_LIMITED`
+      );
+
       return sendError(
         res,
         429,
@@ -254,3 +262,4 @@ module.exports.createAiRateLimiter = createAiRateLimiter;
 module.exports.createAiRouter = createAiRouter;
 module.exports.requireAiAdmin = requireAiAdmin;
 module.exports.requireAiCustomer = requireAiCustomer;
+// Trigger nodemon restart

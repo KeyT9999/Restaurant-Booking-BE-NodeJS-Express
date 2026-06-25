@@ -116,6 +116,7 @@ test('feature flags can disable customer dynamic, owner, admin, and knowledge to
 
   assert.equal(names.includes('search_restaurants'), true);
   assert.equal(names.includes('check_table_availability'), false);
+  assert.equal(names.includes('get_personalized_recommendations'), false);
   assert.equal(names.includes('validate_voucher'), false);
   assert.equal(names.includes('prepare_booking'), false);
   assert.equal(names.includes('search_knowledge'), false);

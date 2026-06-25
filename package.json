@@ -6,7 +6,10 @@
   "scripts": {
     "test": "node --test",
     "dev": "nodemon index.js",
-    "start": "node index.js"
+    "start": "node index.js",
+    "recommendations:rebuild": "node scripts/rebuild-recommendation-dataset.js",
+    "seed:qa-recommendation": "node scripts/seed-qa-recommendation.js",
+    "seed:recommendation-smoke": "node scripts/seed-recommendation-smoke-db.js"
   },
   "keywords": [],
   "author": "",

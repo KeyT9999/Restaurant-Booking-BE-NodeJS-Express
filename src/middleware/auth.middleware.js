@@ -1,16 +1,28 @@
 const User = require('../models/User');
 const { verifyJwtToken } = require('../utils/jwt');
 
-// ─────────────────────────────────────────────
-// Middleware: Xác thực JWT Token
-// ─────────────────────────────────────────────
+const getBearerToken = (req) => {
+  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+    return req.headers.authorization.split(' ')[1];
+  }
+  return null;
+};
+
+const loadAuthenticatedUser = async (token) => {
+  if (!token) return null;
+
+  const decoded = verifyJwtToken(token);
+  const user = await User.findById(decoded.id || decoded.sub).select('-password');
+  if (!user || !user.active) {
+    return null;
+  }
+
+  return user;
+};
+
 const protect = async (req, res, next) => {
   try {
-    // Lấy token từ header Authorization: Bearer <token>
-    let token;
-    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-      token = req.headers.authorization.split(' ')[1];
-    }
+    const token = getBearerToken(req);
 
     if (!token) {
       return res.status(401).json({
@@ -19,11 +31,7 @@ const protect = async (req, res, next) => {
       });
     }
 
-    // Verify token
-    const decoded = verifyJwtToken(token);
-
-    // Tìm user trong DB
-    const user = await User.findById(decoded.id || decoded.sub).select('-password');
+    const user = await loadAuthenticatedUser(token);
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -31,16 +39,8 @@ const protect = async (req, res, next) => {
       });
     }
 
-    // Kiểm tra tài khoản còn active
-    if (!user.active) {
-      return res.status(401).json({
-        success: false,
-        message: 'Tài khoản đã bị vô hiệu hóa.',
-      });
-    }
-
     req.user = user;
-    next();
+    return next();
   } catch (error) {
     if (error.name === 'JsonWebTokenError') {
       return res.status(401).json({ success: false, message: 'Token không hợp lệ.' });
@@ -52,19 +52,38 @@ const protect = async (req, res, next) => {
   }
 };
 
-// ─────────────────────────────────────────────
-// Middleware: Phân quyền theo role
-// ─────────────────────────────────────────────
+const protectOptional = async (req, res, next) => {
+  try {
+    const token = getBearerToken(req);
+    if (!token) {
+      req.user = null;
+      return next();
+    }
+
+    req.user = await loadAuthenticatedUser(token);
+    return next();
+  } catch (error) {
+    req.user = null;
+    return next();
+  }
+};
+
 const restrictTo = (...roles) => {
   return (req, res, next) => {
-    if (!roles.includes(req.user.role)) {
+    if (!req.user || !roles.includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: 'Bạn không có quyền thực hiện hành động này.',
       });
     }
-    next();
+    return next();
   };
 };
 
-module.exports = { protect, restrictTo };
+module.exports = {
+  getBearerToken,
+  loadAuthenticatedUser,
+  protect,
+  protectOptional,
+  restrictTo,
+};

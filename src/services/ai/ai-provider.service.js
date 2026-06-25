@@ -6,6 +6,7 @@ const PROVIDER_NAMES = Object.freeze(['openai', 'groq']);
 const FALLBACK_PROVIDER_ERROR_CODES = new Set([
   'AI_AUTH_ERROR',
   'AI_RATE_LIMITED',
+  'AI_PROVIDER_RATE_LIMITED',
   'AI_TIMEOUT',
   'AI_UNAVAILABLE',
 ]);
@@ -16,7 +17,11 @@ const PUBLIC_ERRORS = {
     retryable: false,
   },
   AI_RATE_LIMITED: {
-    message: 'Trợ lý đang nhận quá nhiều yêu cầu. Vui lòng thử lại sau.',
+    message: 'Bạn đang gửi quá nhiều yêu cầu. Vui lòng thử lại sau.',
+    retryable: true,
+  },
+  AI_PROVIDER_RATE_LIMITED: {
+    message: 'Nhà cung cấp AI đang quá tải hoặc hết hạn mức tạm thời. Vui lòng thử lại sau.',
     retryable: true,
   },
   AI_TIMEOUT: {
@@ -52,7 +57,7 @@ const mapProviderError = (error) => {
     return new AiProviderError('AI_AUTH_ERROR', { cause: error });
   }
   if (status === 429) {
-    return new AiProviderError('AI_RATE_LIMITED', { cause: error });
+    return new AiProviderError('AI_PROVIDER_RATE_LIMITED', { cause: error });
   }
   if (
     error?.name === 'AbortError'
@@ -68,7 +73,7 @@ const mapProviderError = (error) => {
 const mapStreamEventError = (event) => {
   const errorCode = event?.code || event?.response?.error?.code;
   if (errorCode === 'rate_limit_exceeded') {
-    return new AiProviderError('AI_RATE_LIMITED');
+    return new AiProviderError('AI_PROVIDER_RATE_LIMITED');
   }
   return new AiProviderError('AI_UNAVAILABLE');
 };

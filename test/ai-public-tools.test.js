@@ -19,6 +19,7 @@ const createConfig = (overrides = {}) => ({
   rateLimitWindowMs: 60000,
   rateLimitMaxRequests: 10,
   publicToolsEnabled: true,
+  customerDynamicToolsEnabled: true,
   availabilityToolEnabled: true,
   voucherToolEnabled: true,
   bookingPreviewToolEnabled: true,
@@ -50,6 +51,7 @@ test('AI registry keeps Phase 3-9 tools and registers HTTP-only Phase 6 confirm_
     'check_table_availability',
     'confirm_booking',
     'get_booking_policy',
+    'get_personalized_recommendations',
     'get_restaurant_detail',
     'get_restaurant_menu',
     'owner_get_available_tables',
@@ -551,7 +553,7 @@ test('AI orchestrator emits tool events, structured result, and stops tools at c
     events.push(event);
   }
 
-  assert.equal(requests[0].tools.length, 23);
+  assert.equal(requests[0].tools.length, 24);
   assert.deepEqual(events.map((event) => event.type), [
     'tool_started',
     'tool_completed',
