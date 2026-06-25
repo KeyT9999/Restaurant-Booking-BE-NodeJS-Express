@@ -25,6 +25,102 @@ const makeFunctionCallOutputItem = (call, output) => ({
   output: JSON.stringify(output),
 });
 
+const estimateTokens = (text) => {
+  if (typeof text !== 'string') return 0;
+  return Math.ceil(text.length / 4);
+};
+
+const applyTokenBudgetGuard = (instructions, input, maxBudgetTokens = 3000) => {
+  const instructionsTokens = estimateTokens(instructions);
+  let totalTokens = instructionsTokens + input.reduce((acc, msg) => {
+    const content = msg.content || msg.output || JSON.stringify(msg);
+    return acc + estimateTokens(content);
+  }, 0);
+
+  const inputTokensBeforeTrim = totalTokens;
+  let trimmedHistoryCount = 0;
+  let trimmedToolPayload = false;
+
+  if (totalTokens <= maxBudgetTokens) {
+    return {
+      input,
+      inputTokensBeforeTrim,
+      inputTokensAfterTrim: totalTokens,
+      trimmedHistoryCount,
+      trimmedToolPayload,
+    };
+  }
+
+  let cleanInput = [...input];
+
+  let userQueryIndex = cleanInput.findIndex(msg => 
+    msg.role === 'user' && 
+    (msg.content?.includes('[BookEat page context') || 
+     msg.content?.includes('[BookEat owner context') || 
+     msg.content?.includes('[BookEat admin context') || 
+     !msg.content?.startsWith('{'))
+  );
+
+  if (userQueryIndex === -1) {
+    userQueryIndex = cleanInput.findIndex(msg => 
+      msg.role === 'function_call' || msg.type === 'function_call' || 
+      msg.role === 'function_call_output' || msg.type === 'function_call_output'
+    ) - 1;
+    if (userQueryIndex < 0) {
+      userQueryIndex = cleanInput.length - 1;
+    }
+  }
+
+  while (userQueryIndex > 0 && totalTokens > maxBudgetTokens) {
+    const removed = cleanInput.shift();
+    userQueryIndex -= 1;
+    trimmedHistoryCount += 1;
+    const content = removed.content || removed.output || JSON.stringify(removed);
+    totalTokens -= estimateTokens(content);
+  }
+
+  if (totalTokens > maxBudgetTokens) {
+    for (let i = 0; i < cleanInput.length; i++) {
+      const msg = cleanInput[i];
+      if ((msg.role === 'function_call_output' || msg.type === 'function_call_output' || msg.output !== undefined) && msg.output) {
+        let outputStr = typeof msg.output === 'string' ? msg.output : JSON.stringify(msg.output);
+        if (outputStr.length > 500) {
+          try {
+            const parsed = JSON.parse(outputStr);
+            if (parsed.payload && Array.isArray(parsed.payload.items)) {
+              parsed.payload.items = parsed.payload.items.slice(0, 2);
+              const trimmedStr = JSON.stringify(parsed);
+              if (trimmedStr.length < outputStr.length) {
+                totalTokens -= estimateTokens(outputStr) - estimateTokens(trimmedStr);
+                msg.output = trimmedStr;
+                trimmedToolPayload = true;
+              }
+            } else {
+              const trimmedStr = outputStr.slice(0, 300) + '... [trimmed]';
+              totalTokens -= estimateTokens(outputStr) - estimateTokens(trimmedStr);
+              msg.output = trimmedStr;
+              trimmedToolPayload = true;
+            }
+          } catch {
+            const trimmedStr = outputStr.slice(0, 300) + '... [trimmed]';
+            totalTokens -= estimateTokens(outputStr) - estimateTokens(trimmedStr);
+            msg.output = trimmedStr;
+            trimmedToolPayload = true;
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    input: cleanInput,
+    inputTokensBeforeTrim,
+    inputTokensAfterTrim: totalTokens,
+    trimmedHistoryCount,
+    trimmedToolPayload,
+  };
+};
+
 const createAiOrchestrator = ({
   provider = createAiProviderManager(),
   configProvider = getAiConfig,
@@ -58,7 +154,8 @@ const createAiOrchestrator = ({
 
     try {
       const prompt = buildPrompt({ message, history, pageContext, ownerContext, adminContext });
-      const toolDefinitions = config.publicToolsEnabled === false ? [] : registry.getToolDefinitions();
+      const role = user === undefined ? undefined : (user?.role || 'guest');
+      const toolDefinitions = config.publicToolsEnabled === false ? [] : registry.getToolDefinitions(role);
       const maxToolRounds = Number.isInteger(config.maxToolRounds) ? config.maxToolRounds : 3;
       const maxToolCalls = Number.isInteger(config.maxToolCalls) ? config.maxToolCalls : 5;
       let input = prompt.input;
@@ -72,9 +169,12 @@ const createAiOrchestrator = ({
           && toolCallsUsed < maxToolCalls;
         const roundToolCalls = [];
 
+        const guardResult = applyTokenBudgetGuard(prompt.instructions, input);
+        console.info(`[AI Token Budget Guard] inputTokensBeforeTrim=${guardResult.inputTokensBeforeTrim} inputTokensAfterTrim=${guardResult.inputTokensAfterTrim} trimmedHistoryCount=${guardResult.trimmedHistoryCount} trimmedToolPayload=${guardResult.trimmedToolPayload}`);
+
         for await (const event of provider.streamText({
           instructions: prompt.instructions,
-          input,
+          input: guardResult.input,
           config,
           signal: timeoutController.signal,
           tools: canUseTools ? toolDefinitions : [],

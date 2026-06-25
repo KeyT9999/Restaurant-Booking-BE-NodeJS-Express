@@ -61,6 +61,68 @@ const getCity = (normalizedMessage) => {
   return null;
 };
 
+const getDistrict = (message) => {
+  const raw = String(message || '');
+  const match = raw.match(/\b(?:quan|q\.?)\s*(\d{1,2})\b/i);
+  return match ? `Quan ${match[1]}` : null;
+};
+
+const getRecommendationBudget = (normalizedMessage) => {
+  if (/\b(re|gia re|tiet kiem|binh dan|duoi)\b/.test(normalizedMessage)) return 'low';
+  if (/\b(vua tui tien|trung binh|tam trung|medium)\b/.test(normalizedMessage)) return 'medium';
+  if (/\b(cao cap|sang|expensive|premium)\b/.test(normalizedMessage)) return 'high';
+  return null;
+};
+
+const getRecommendationCuisine = (message, normalizedMessage) => {
+  if (normalizedMessage.includes('pho')) return 'pho';
+  if (normalizedMessage.includes('hai san')) return 'hai san';
+  if (normalizedMessage.includes('mon nhat') || normalizedMessage.includes('nha hang nhat')) return 'Nhat';
+  if (normalizedMessage.includes('han quoc') || normalizedMessage.includes('nha hang han')) return 'Han Quoc';
+  if (normalizedMessage.includes('lau')) return 'lau';
+  if (normalizedMessage.includes('nuong')) return 'nuong';
+  const keyword = getSearchKeyword(message);
+  return keyword && keyword.length <= 40 ? keyword : null;
+};
+
+const getRecommendationPreferredTime = (normalizedMessage) => {
+  if (normalizedMessage.includes('toi nay') || normalizedMessage.includes('buoi toi')) return '19:00';
+  if (normalizedMessage.includes('trua') || normalizedMessage.includes('buoi trua')) return '12:00';
+  if (normalizedMessage.includes('sang') || normalizedMessage.includes('an sang')) return '08:00';
+  return null;
+};
+
+const getRecommendationType = (normalizedMessage) => {
+  if (
+    normalizedMessage.includes('ca nha hang va mon')
+    || normalizedMessage.includes('ca mon va nha hang')
+    || normalizedMessage.includes('nha hang va mon')
+    || normalizedMessage.includes('mon va nha hang')
+    || normalizedMessage.includes('tong hop')
+    || normalizedMessage.includes('mixed')
+  ) {
+    return 'mixed';
+  }
+  if (
+    normalizedMessage.includes('mon')
+    || normalizedMessage.includes('menu')
+    || normalizedMessage.includes('an gi')
+  ) {
+    return 'menu_item';
+  }
+  return 'restaurant';
+};
+
+const isPersonalizedRecommendationRequest = (normalizedMessage) => (
+  normalizedMessage.includes('ca nhan hoa')
+  || normalizedMessage.includes('hop voi toi')
+  || normalizedMessage.includes('hop gu toi')
+  || normalizedMessage.includes('goi y cho toi')
+  || normalizedMessage.includes('de xuat cho toi')
+  || normalizedMessage.includes('toi nen an gi')
+  || normalizedMessage.includes('toi nen dat quan nao')
+);
+
 const getLocalDateString = (offsetDays = 0) => {
   const date = new Date(Date.now() + offsetDays * 24 * 60 * 60 * 1000);
   return new Intl.DateTimeFormat('en-CA', {
@@ -128,6 +190,24 @@ const extractAmountEstimate = (message) => {
 const inferToolCall = ({ message, pageContext }) => {
   const normalized = normalizeText(message);
   const restaurantId = getRestaurantIdFromContext(pageContext);
+
+  if (isPersonalizedRecommendationRequest(normalized)) {
+    return {
+      name: 'get_personalized_recommendations',
+      args: {
+        type: getRecommendationType(normalized),
+        limit: 5,
+        context: {
+          budget: getRecommendationBudget(normalized),
+          cuisine: getRecommendationCuisine(message, normalized),
+          location: getDistrict(message) || getCity(normalized),
+          numberOfGuests: extractGuestCount(message),
+          occasion: null,
+          preferredTime: getRecommendationPreferredTime(normalized),
+        },
+      },
+    };
+  }
 
   if (
     normalized.includes('voucher')
@@ -276,6 +356,14 @@ const getToolSummary = (toolName, toolResult, fallbackNote) => {
   if (!toolResult.ok) return toolResult.message || 'Tool public t\u1ea1m th\u1eddi kh\u00f4ng kh\u1ea3 d\u1ee5ng.';
   if (fallbackNote) return fallbackNote;
 
+  if (toolName === 'get_personalized_recommendations') {
+    const count = Number(payload.items?.length || 0);
+    return payload.message || (
+      count > 0
+        ? `Da tim thay ${count} goi y phu hop.`
+        : 'Chua tim thay goi y phu hop luc nay.'
+    );
+  }
   if (toolName === 'search_restaurants') {
     const count = Number(payload.returned ?? payload.restaurants?.length ?? 0);
     return count > 0

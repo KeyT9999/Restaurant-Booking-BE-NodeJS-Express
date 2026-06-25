@@ -356,7 +356,7 @@ const createAiKnowledgeService = ({
       return { insertedCount: 0, upsertedCount: 0, matchedCount: 0 };
     }
 
-    return documentModel.bulkWrite(operations, { ordered: false });
+    return documentModel.bulkWrite(operations, { ordered: false, timestamps: false });
   };
 
   return {

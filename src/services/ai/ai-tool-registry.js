@@ -8,6 +8,7 @@ const { createCustomerDynamicTools } = require('./tools/customer-dynamic.tools')
 const { createKnowledgeTools } = require('./tools/knowledge.tools');
 const { createOwnerTools } = require('./tools/owner.tools');
 const { createAdminTools } = require('./tools/admin.tools');
+const { createRecommendationTools } = require('./tools/recommendation.tools');
 
 const withObjectSchema = (properties, required = []) => ({
   type: 'object',
@@ -774,6 +775,31 @@ const phase5ToolMetadata = Object.freeze([
       'occasion',
     ]),
   },
+  {
+    name: 'get_personalized_recommendations',
+    description: 'Get personalized restaurant, menu items, or mixed recommendations for the current customer based on their history, preferences, and context.',
+    label: 'Đang tìm gợi ý phù hợp...',
+    access: 'public',
+    allowedRoles: PUBLIC_TOOL_ROLES,
+    resultType: 'personalized_recommendations',
+    featureFlags: ['customerDynamicToolsEnabled'],
+    schema: withObjectSchema({
+      type: {
+        type: 'string',
+        description: 'Type of recommendation requested: restaurant, menu_item, or mixed.',
+      },
+      limit: {
+        type: ['integer', 'null'],
+        minimum: 1,
+        maximum: 10,
+        description: 'Maximum recommendations to return (1-10).',
+      },
+      context: {
+        type: ['object', 'null'],
+        description: 'Optional recommendation context.',
+      },
+    }, ['type', 'limit', 'context']),
+  },
 ]);
 
 const phase6ToolMetadata = Object.freeze([
@@ -807,6 +833,7 @@ const createDefaultHandlers = () => ({
   ...createKnowledgeTools(),
   ...createOwnerTools(),
   ...createAdminTools(),
+  ...createRecommendationTools(),
 });
 
 const getRegistryFlags = () => {
@@ -869,9 +896,19 @@ const createAiToolRegistry = ({
     listTools() {
       return Array.from(tools.values());
     },
-    getToolDefinitions() {
+    getToolDefinitions(role) {
       return Array.from(tools.values())
-        .filter((tool) => tool.exposedToModel !== false)
+        .filter((tool) => {
+          if (tool.exposedToModel === false) return false;
+          if (!role) return true;
+          const allowedRoles = tool.allowedRoles || (
+            tool.access === 'public'
+              ? PUBLIC_TOOL_ROLES
+              : tool.access === 'owner' ? ['restaurant_owner']
+                : tool.access === 'admin' ? ['admin'] : ['customer']
+          );
+          return allowedRoles.includes(role);
+        })
         .map((tool) => tool.definition);
     },
     getToolNames() {
