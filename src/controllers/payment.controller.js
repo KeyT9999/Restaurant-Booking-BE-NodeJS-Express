@@ -92,7 +92,38 @@ const findReusablePendingPayment = async ({ userId, targetType, targetId, metada
   if (!pendingPayments.length) return null;
 
   if (targetType !== 'subscription') {
-    return pendingPayments.find((payment) => payment.checkoutUrl) || null;
+    const candidate = pendingPayments.find((payment) => payment.checkoutUrl);
+    if (candidate) {
+      try {
+        const payosInfo = await payosService.getPaymentInfo(Number(candidate.orderCode));
+        const gatewayStatus = payosInfo?.data?.status;
+        if (gatewayStatus && gatewayStatus !== 'PENDING') {
+          candidate.status = gatewayStatus === 'PAID' ? 'paid' : (gatewayStatus === 'EXPIRED' ? 'expired' : 'cancelled');
+          if (candidate.status !== 'paid') {
+            candidate.cancelledAt = new Date();
+          } else {
+            candidate.paidAt = new Date();
+            await _processPaymentSuccess(candidate, null);
+          }
+          await candidate.save();
+          return findReusablePendingPayment({ userId, targetType, targetId, metadata });
+        }
+      } catch (err) {
+        console.error('Error verifying reusable payment with PayOS:', err.message);
+        const isNotFoundError = err.response?.status === 404 || 
+                               err.message.includes('404') || 
+                               err.message.toLowerCase().includes('not found') || 
+                               err.message.includes('không tồn tại');
+        if (isNotFoundError) {
+          candidate.status = 'cancelled';
+          candidate.cancelledAt = new Date();
+          await candidate.save();
+          return findReusablePendingPayment({ userId, targetType, targetId, metadata });
+        }
+      }
+      return candidate;
+    }
+    return null;
   }
 
   const requestedPlan = getPaymentPlanCode(metadata);
@@ -160,9 +191,10 @@ exports.createPayment = async (req, res) => {
     let description = '';
     let restaurantId = null;
     let metadata = {};
+    let booking = null;
 
     if (targetType === 'booking') {
-      const booking = await Booking.findById(targetId).populate('restaurantId').populate('voucherId');
+      booking = await Booking.findById(targetId).populate('restaurantId').populate('voucherId');
       if (!booking) {
         return res.status(404).json({ success: false, message: 'Booking not found.' });
       }
