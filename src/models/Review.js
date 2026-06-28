@@ -104,6 +104,10 @@ const reviewSchema = new mongoose.Schema(
     },
 
     // ─── Moderation ───
+    isEdited: {
+      type: Boolean,
+      default: false,
+    },
     status: {
       type: String,
       enum: ['approved', 'reported', 'hidden'],
@@ -153,6 +157,7 @@ reviewSchema.methods.toPublicJSON = function () {
       content: this.ownerReply.content || this.ownerReply.comment,
       repliedAt: this.ownerReply.repliedAt,
     } : null,
+    isEdited: this.isEdited || false,
     status: this.status,
     createdAt: this.createdAt,
     updatedAt: this.updatedAt,
@@ -175,6 +180,7 @@ reviewSchema.methods.toAdminJSON = function () {
     reportedBy: this.reportedBy,
     reportCount: this.reportCount,
     ownerReply: this.ownerReply,
+    isEdited: this.isEdited || false,
     status: this.status,
     hiddenBy: this.hiddenBy,
     hiddenAt: this.hiddenAt,

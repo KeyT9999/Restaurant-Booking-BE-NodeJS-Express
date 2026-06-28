@@ -317,6 +317,7 @@ bookingSchema.methods.toPublicJSON = function () {
     sourceWaitlistId: this.sourceWaitlistId,
     tableNumbers: this.tableNumbers,
     reviewed: this.reviewed,
+    reviewId: this.reviewId,
     checkedInAt: this.checkedInAt,
     preOrderItems: this.preOrderItems,
     createdAt: this.createdAt,
