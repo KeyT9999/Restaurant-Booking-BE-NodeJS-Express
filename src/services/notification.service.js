@@ -575,6 +575,18 @@ const notifyChatMessage = async (io, { result, sender }) => {
   return [];
 };
 
+const notifyBookingReminder = async (io, booking) => createNotification({
+  type: 'booking_reminder',
+  title: 'Nhắc nhở lịch đặt bàn',
+  message: `Nhắc nhở: Bạn có lịch hẹn đặt bàn lúc ${formatDateTime(booking)}.`,
+  recipientId: booking.customerId,
+  recipientRole: 'customer',
+  restaurantId: booking.restaurantId,
+  relatedEntity: bookingEntity(booking),
+  actionUrl: `/bookings/${booking._id}`,
+  sourceKey: `booking:${booking._id}:reminder:customer`,
+}, { io });
+
 module.exports = {
   createHttpError,
   normalizeRole,
@@ -596,4 +608,5 @@ module.exports = {
   notifyRestaurantAdminAction,
   notifyVoucherCreated,
   notifyChatMessage,
+  notifyBookingReminder,
 };
