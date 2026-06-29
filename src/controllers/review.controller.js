@@ -197,6 +197,7 @@ const updateReview = async (req, res) => {
     if (title !== undefined) review.title = title || null;
     if (images !== undefined) review.images = images || [];
 
+    review.isEdited = true;
     await review.save();
 
     if (rating !== undefined) {

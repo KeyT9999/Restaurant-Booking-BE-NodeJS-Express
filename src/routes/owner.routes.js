@@ -3,6 +3,7 @@
 const express = require('express');
 const { protect, restrictTo } = require('../middleware/auth.middleware');
 const ownerRestaurantController = require('../controllers/owner.restaurant.controller');
+const ownerBlockedSlotController = require('../controllers/owner.blocked-slot.controller');
 
 const router = express.Router();
 
@@ -16,5 +17,10 @@ router.get('/restaurants',  ownerRestaurantController.getMyRestaurants);
 router.get('/restaurants/:restaurantId', ownerRestaurantController.getMyRestaurantById);
 router.put('/restaurants/:restaurantId', ownerRestaurantController.updateRestaurant);
 router.get('/restaurants/:restaurantId/dashboard', ownerRestaurantController.getRestaurantDashboard);
+
+// ─── Blocked Slots ───
+router.get('/restaurants/:restaurantId/blocked-slots', ownerBlockedSlotController.getBlockedSlots);
+router.post('/restaurants/:restaurantId/blocked-slots', ownerBlockedSlotController.createBlockedSlot);
+router.delete('/restaurants/:restaurantId/blocked-slots/:id', ownerBlockedSlotController.deleteBlockedSlot);
 
 module.exports = router;

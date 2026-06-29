@@ -23,6 +23,7 @@ const PUBLIC_TOOL_ERROR_MESSAGES = Object.freeze({
   MENU_NOT_FOUND: 'Không tìm thấy menu công khai phù hợp.',
   POLICY_NOT_FOUND: 'Không tìm thấy nguồn chính sách công khai phù hợp.',
   TOOL_INTERNAL_ERROR: 'Tool tạm thời không khả dụng.',
+  INVALID_REQUEST: 'Yeu cau goi y chua hop le.',
 });
 
 class AiToolRunnerError extends Error {
@@ -135,6 +136,13 @@ const validateValue = (schema, value, path) => {
     }
     if (schema.items) {
       value.forEach((item, index) => validateValue(schema.items, item, `${path}[${index}]`));
+    }
+    return;
+  }
+
+  if (types.includes('object')) {
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      throw new AiToolRunnerError('TOOL_INVALID_ARGUMENT', `${path} must be an object.`);
     }
     return;
   }
@@ -329,6 +337,46 @@ const makeAuthRequiredResult = (tool, args) => {
   };
 };
 
+const sanitizeToolResultForLlm = (value, toolName) => {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeToolResultForLlm(item, toolName));
+  }
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  const excludeKeys = new Set([
+    'scoreBreakdown',
+    'componentScores',
+    'matchDetails',
+    'rawProfile',
+    'rawHistory',
+    'rawInteractions',
+  ]);
+
+  const entries = Object.entries(value)
+    .filter(([key]) => !excludeKeys.has(key))
+    .map(([key, val]) => {
+      if (key === 'image' || key === 'imageUrl') {
+        return [key, val ? '[image_url]' : null];
+      }
+      if (key === 'metadata' && val && typeof val === 'object') {
+        const cleanMeta = {};
+        const allowedMeta = ['restaurantId', 'menuItemId', 'available', 'tableId', 'voucherId', 'pendingActionId'];
+        for (const k of allowedMeta) {
+          if (val[k] !== undefined) cleanMeta[k] = val[k];
+        }
+        return [key, cleanMeta];
+      }
+      if (key === 'reasons' && Array.isArray(val)) {
+        return [key, val.slice(0, 3)];
+      }
+      return [key, sanitizeToolResultForLlm(val, toolName)];
+    });
+
+  return Object.fromEntries(entries);
+};
+
 const createAiToolRunner = ({
   registry = createAiToolRegistry(),
   auditLogger = AiToolAuditLog,
@@ -397,7 +445,7 @@ const createAiToolRunner = ({
         result,
         modelOutput: {
           ok: true,
-          result,
+          result: sanitizeToolResultForLlm(result, toolName),
         },
       };
     } catch (error) {
@@ -425,7 +473,7 @@ const createAiToolRunner = ({
             message: getPublicToolMessage(runnerError.code),
             ...(runnerError.details ? { details: runnerError.details } : {}),
           },
-          ...(result ? { result } : {}),
+          ...(result ? { result: sanitizeToolResultForLlm(result, toolName) } : {}),
         },
       };
     }

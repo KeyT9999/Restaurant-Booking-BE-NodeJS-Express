@@ -95,6 +95,17 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    // ─── Loyalty Points (BookEat Coins) ───
+    loyaltyPoints: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    totalPointsEarned: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
   },
   {
     timestamps: true, // tự tạo createdAt, updatedAt
@@ -128,6 +139,8 @@ userSchema.methods.toPublicJSON = function () {
     lastLogin: this.lastLogin,
     noShowCounter: this.noShowCounter,
     bookingBlockedUntil: this.bookingBlockedUntil,
+    loyaltyPoints: this.loyaltyPoints || 0,
+    totalPointsEarned: this.totalPointsEarned || 0,
     createdAt: this.createdAt,
     updatedAt: this.updatedAt,
   };

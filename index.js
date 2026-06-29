@@ -107,9 +107,12 @@ apiRouter.use('/webhooks',    require('./src/routes/webhook.routes'));
 apiRouter.use('/refunds',     require('./src/routes/refund.routes'));
 apiRouter.use('/vouchers',    require('./src/routes/voucher.routes'));
 apiRouter.use('/reviews',     require('./src/routes/review.routes'));
+apiRouter.use('/loyalty',     require('./src/routes/loyalty.routes'));
 apiRouter.use('/notifications', require('./src/routes/notification.routes'));
 apiRouter.use('/customer/favorites', require('./src/routes/customer.favorite.routes'));
+apiRouter.use('/recommendations', require('./src/routes/recommendation.routes'));
 apiRouter.use('/ai', require('./src/routes/ai.routes'));
+apiRouter.use('/openai', require('./src/routes/food-recommendation.routes'));
 
 // Test route
 apiRouter.get('/ping', (req, res) => {

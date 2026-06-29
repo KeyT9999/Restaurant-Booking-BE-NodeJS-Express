@@ -5,6 +5,7 @@ const RestaurantTable = require('../models/RestaurantTable');
 const Restaurant = require('../models/Restaurant');
 const User = require('../models/User');
 const TableReservation = require('../models/TableReservation');
+const BlockedSlot = require('../models/BlockedSlot');
 
 const BOOKING_CONSTANTS = {
   MIN_BOOKING_ADVANCE_MINUTES: 30,
@@ -144,6 +145,43 @@ const validateBookingTime = async (bookingDate, bookingTime, restaurant) => {
     errors.push(`Giờ đặt bàn nằm ngoài thời gian hoạt động của nhà hàng (${hours.open} - ${hours.close})`);
   }
 
+  // 5. Check against Blocked Slots (for full restaurant blocks)
+  try {
+    const normalizedDate = normalizeDate(bookingDate);
+    const blockedSlots = await BlockedSlot.find({
+      restaurantId: restaurant._id,
+      date: normalizedDate,
+    });
+
+    const bookingEnd = new Date(proposedDateTime.getTime() + BOOKING_CONSTANTS.BOOKING_DURATION_HOURS * 60 * 60 * 1000);
+
+    for (const slot of blockedSlots) {
+      if (!slot.tableNumbers || slot.tableNumbers.length === 0) {
+        if (slot.slotType === 'full_day') {
+          errors.push(slot.reason ? `Nhà hàng đóng cửa hôm nay: ${slot.reason}` : 'Nhà hàng đóng cửa hôm nay');
+          return { valid: false, errors };
+        } else if (slot.slotType === 'time_range') {
+          const blockStart = combineDateAndTime(bookingDate, slot.startTime);
+          let blockEnd = combineDateAndTime(bookingDate, slot.endTime);
+          if (blockEnd <= blockStart) {
+            blockEnd = new Date(blockEnd.getTime() + 24 * 60 * 60 * 1000);
+          }
+
+          if (proposedDateTime < blockEnd && bookingEnd > blockStart) {
+            errors.push(
+              slot.reason
+                ? `Khung giờ này nhà hàng không nhận khách: ${slot.reason} (${slot.startTime} - ${slot.endTime})`
+                : `Khung giờ này nhà hàng không nhận khách (${slot.startTime} - ${slot.endTime})`
+            );
+            return { valid: false, errors };
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Error validating blocked slots:', err);
+  }
+
   return {
     valid: errors.length === 0,
     errors,
@@ -210,10 +248,52 @@ const getAvailableTables = async (restaurantId, bookingDate, bookingTime, exclud
   });
   const heldSet = new Set(heldTableNumbers);
 
+  // Check blocked slots for tables
+  const blockedTableNumbers = [];
+  try {
+    const normalizedDate = normalizeDate(bookingDate);
+    const blockedSlots = await BlockedSlot.find({
+      restaurantId,
+      date: normalizedDate,
+    });
+
+    const proposedDateTime = combineDateAndTime(bookingDate, bookingTime);
+    const bookingEnd = new Date(proposedDateTime.getTime() + BOOKING_CONSTANTS.BOOKING_DURATION_HOURS * 60 * 60 * 1000);
+
+    for (const slot of blockedSlots) {
+      let overlaps = false;
+      if (slot.slotType === 'full_day') {
+        overlaps = true;
+      } else if (slot.slotType === 'time_range') {
+        const blockStart = combineDateAndTime(bookingDate, slot.startTime);
+        let blockEnd = combineDateAndTime(bookingDate, slot.endTime);
+        if (blockEnd <= blockStart) {
+          blockEnd = new Date(blockEnd.getTime() + 24 * 60 * 60 * 1000);
+        }
+        if (proposedDateTime < blockEnd && bookingEnd > blockStart) {
+          overlaps = true;
+        }
+      }
+
+      if (overlaps) {
+        if (!slot.tableNumbers || slot.tableNumbers.length === 0) {
+          // If a slot blocks the entire restaurant, return empty array immediately
+          return [];
+        } else {
+          blockedTableNumbers.push(...slot.tableNumbers);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Error fetching blocked tables:', err);
+  }
+
+  const blockedSet = new Set(blockedTableNumbers);
   const availableTables = [];
 
   for (const table of allTables) {
     if (heldSet.has(table.tableNumber)) continue;
+    if (blockedSet.has(table.tableNumber)) continue;
     const { hasConflict } = await checkTimeConflict(restaurantId, table.tableNumber, bookingDate, bookingTime);
     if (!hasConflict) {
       availableTables.push(table);
