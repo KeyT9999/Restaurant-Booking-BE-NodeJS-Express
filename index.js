@@ -111,12 +111,18 @@ apiRouter.use('/loyalty',     require('./src/routes/loyalty.routes'));
 apiRouter.use('/notifications', require('./src/routes/notification.routes'));
 apiRouter.use('/customer/favorites', require('./src/routes/customer.favorite.routes'));
 apiRouter.use('/recommendations', require('./src/routes/recommendation.routes'));
+apiRouter.use('/nearby', require('./src/routes/location-recommendation.routes'));
 apiRouter.use('/ai', require('./src/routes/ai.routes'));
 apiRouter.use('/openai', require('./src/routes/food-recommendation.routes'));
 
 // Test route
 apiRouter.get('/ping', (req, res) => {
   res.json({ message: 'pong 🏓', timestamp: new Date().toISOString() });
+});
+
+// Simple test endpoint without middleware
+app.get('/test', (req, res) => {
+  res.json({ success: true, message: 'Server is working!' });
 });
 
 // ─────────────────────────────────────────────

@@ -68,6 +68,19 @@ const restaurantSchema = new mongoose.Schema(
       latitude: { type: Number, default: null },
       longitude: { type: Number, default: null },
     },
+    // GeoJSON location for geospatial queries (MongoDB 2dsphere)
+    // Format: { type: 'Point', coordinates: [longitude, latitude] }
+    location: {
+      type: {
+        type: String,
+        enum: ['Point'],
+        default: 'Point',
+      },
+      coordinates: {
+        type: [Number], // [longitude, latitude] - GeoJSON format
+        default: null,
+      },
+    },
 
     // ─── Business Details ───
     cuisineTypes: [{
@@ -301,6 +314,8 @@ restaurantSchema.index({ deletedAt: 1 });
 restaurantSchema.index({ featured: 1 });
 restaurantSchema.index({ createdAt: -1 });
 restaurantSchema.index({ ownerId: 1, approvalStatus: 1 });
+// Geospatial index for "nearby" queries - required for $geoNear
+restaurantSchema.index({ location: '2dsphere' });
 
 // ─── Virtual: Primary Image ───
 restaurantSchema.virtual('primaryImage').get(function () {
