@@ -68,9 +68,13 @@ const normalizeCuisineMatch = (category) => {
 };
 
 const generateGoogleMapsLink = (latitude, longitude, name) => {
-  if (!latitude || !longitude) return null;
-  // Use Google Maps search URL with coordinates
-  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(name || 'restaurant')}&query_place_id=ChIJ${latitude},${longitude}`;
+  // Dùng toạ độ chính xác để drop pin đỏ. Nếu không có toạ độ thì tìm theo tên.
+  if (latitude && longitude) {
+    const label = encodeURIComponent(name || 'Nhà hàng');
+    return `https://www.google.com/maps?q=${latitude},${longitude}&z=17&label=${label}`;
+  }
+  if (!name) return null;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(name)}`;
 };
 
 const generateRecommendationReason = (restaurant) => {
@@ -243,7 +247,7 @@ const createLocationRecommendationService = (dependencies = {}) => {
         priceRangeText: getPriceRangeText(restaurant.priceRange),
         averagePrice: restaurant.averagePrice,
         isOpen: true,
-        image: restaurant.images?.[0]?.url || null,
+        photo: restaurant.images?.[0]?.url || null,
         score: 0.5,
         reason: 'Nhà hàng nổi bật trên BookEat',
         googleMapsLink: generateGoogleMapsLink(restaurant.coordinates?.latitude, restaurant.coordinates?.longitude, restaurant.name),
@@ -286,7 +290,7 @@ const createLocationRecommendationService = (dependencies = {}) => {
         priceRangeText: getPriceRangeText(restaurant.priceRange),
         averagePrice: restaurant.averagePrice,
         isOpen: true,
-        image: restaurant.images?.[0]?.url || null,
+        photo: restaurant.images?.[0]?.url || null,
         score: roundNumber(score, 4),
         reason: generateRecommendationReason(restaurant),
         googleMapsLink: generateGoogleMapsLink(restaurant.coordinates?.latitude, restaurant.coordinates?.longitude, restaurant.name),
