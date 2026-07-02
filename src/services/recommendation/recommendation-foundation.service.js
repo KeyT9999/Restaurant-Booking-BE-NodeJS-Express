@@ -33,6 +33,8 @@ const PUBLIC_RESTAURANT_FILTER = Object.freeze({
   approvalStatus: 'approved',
   active: true,
   deletedAt: null,
+  hasMenu: true,
+  hasTableLayout: true,
 });
 
 const parsePositiveInt = (value, fallback = DEFAULT_LIMIT, max = MAX_LIMIT) => {

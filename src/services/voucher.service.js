@@ -274,6 +274,18 @@ const saveVoucherForCustomer = async (voucherId, customerId, source = 'manual_sa
     throw new Error(globalResult.reason);
   }
 
+  // Deduct coins if loyalty voucher
+  if (voucher.type === 'loyalty' && voucher.pointsCost > 0) {
+    const loyaltyService = require('./loyalty.service');
+    await loyaltyService.deductCoins(
+      customerId,
+      voucher.pointsCost,
+      'redeem_voucher',
+      voucher._id,
+      `Đổi ${voucher.pointsCost.toLocaleString('vi-VN')} Coins lấy mã giảm giá ${voucher.code}`
+    );
+  }
+
   const savedVoucher = new CustomerVoucher({
     customerId,
     voucherId,

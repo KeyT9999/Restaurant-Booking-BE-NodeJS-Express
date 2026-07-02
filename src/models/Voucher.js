@@ -119,6 +119,11 @@ const voucherSchema = new mongoose.Schema(
       ref: 'User',
       required: [true, 'Người tạo voucher là bắt buộc'],
     },
+    pointsCost: {
+      type: Number,
+      default: 0,
+      min: [0, 'Số điểm đổi không thể âm'],
+    },
   },
   {
     timestamps: true,

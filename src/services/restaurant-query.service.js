@@ -318,6 +318,8 @@ const formatPublicRestaurantDetail = (restaurant, featuredPlacement = null, vouc
   stats: restaurant.stats,
   averageRating: restaurant.stats?.averageRating || 0,
   reviewCount: restaurant.stats?.totalReviews || 0,
+  active: restaurant.active,
+  approvalStatus: restaurant.approvalStatus,
   ...featuredFields,
   ...voucherCampaignFields,
   voucherCampaigns,

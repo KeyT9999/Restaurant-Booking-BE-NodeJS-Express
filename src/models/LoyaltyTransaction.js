@@ -14,7 +14,7 @@ const loyaltyTransactionSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['earn_deposit', 'earn_completed', 'redeem_deposit', 'refund', 'admin_adjust'],
+      enum: ['earn_deposit', 'earn_completed', 'redeem_deposit', 'redeem_voucher', 'refund', 'admin_adjust'],
       required: [true, 'Loại giao dịch là bắt buộc'],
     },
     referenceId: {

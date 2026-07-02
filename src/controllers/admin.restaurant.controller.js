@@ -129,6 +129,11 @@ const approveRestaurant = async (req, res) => {
     restaurant.rejectionReason = null;
     restaurant.suspensionReason = null;
     restaurant.active = true;
+
+    // Auto-verify business license if present
+    if (restaurant.businessLicense && restaurant.businessLicense.number && restaurant.businessLicense.imageUrl) {
+      restaurant.businessLicense.verifiedAt = new Date();
+    }
     
     if (commissionRate !== undefined && commissionRate >= 0 && commissionRate <= 100) {
       restaurant.commissionRate = commissionRate;
