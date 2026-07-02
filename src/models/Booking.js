@@ -100,7 +100,7 @@ const bookingSchema = new mongoose.Schema(
     },
     cancelledBy: {
       type: String,
-      enum: ['customer', 'restaurant', 'admin', null],
+      enum: ['customer', 'restaurant', 'admin', 'system', null],
       default: null,
     },
     cancelledAt: {
@@ -368,5 +368,40 @@ bookingSchema.methods.toAdminJSON = function () {
     updatedAt: this.updatedAt,
   };
 };
+
+// Pre-save to detect transition to completed
+bookingSchema.pre('save', function () {
+  if (this.isModified('status') && this.status === 'completed') {
+    this._becameCompleted = true;
+  }
+});
+
+// Post-save to award points
+bookingSchema.post('save', async function (doc) {
+  if (doc._becameCompleted) {
+    try {
+      const loyaltyService = require('../services/loyalty.service');
+      const Restaurant = mongoose.model('Restaurant');
+      
+      const restaurant = await Restaurant.findById(doc.restaurantId);
+      const restaurantName = restaurant ? restaurant.name : 'nhà hàng';
+      
+      const baseCoins = 5000; // 5,000 Coins base
+      const depositCoins = doc.depositPaid ? Math.floor(doc.depositAmount * 0.05) : 0;
+      const totalEarned = baseCoins + depositCoins;
+
+      await loyaltyService.addCoins(
+        doc.customerId,
+        totalEarned,
+        'earn_completed',
+        doc._id,
+        `Tích lũy ${totalEarned.toLocaleString('vi-VN')} Coins từ đơn đặt bàn hoàn tất #${doc._id.toString().slice(-8)} tại ${restaurantName}`
+      );
+      console.log(`[Loyalty] Auto-credited ${totalEarned} coins to user ${doc.customerId} for completed booking ${doc._id}`);
+    } catch (err) {
+      console.error('❌ [Loyalty Hook] Failed to award coins:', err.message);
+    }
+  }
+});
 
 module.exports = mongoose.model('Booking', bookingSchema);

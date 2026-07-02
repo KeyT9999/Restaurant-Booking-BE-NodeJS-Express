@@ -139,7 +139,7 @@ exports.getPlatformVouchers = async (req, res) => {
     const { page = 1, limit = 10 } = req.query;
 
     const filter = {
-      type: 'platform',
+      type: { $in: ['platform', 'loyalty'] },
       status: 'active',
       startDate: { $lte: now },
       $or: [

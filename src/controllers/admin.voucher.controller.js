@@ -82,6 +82,7 @@ exports.createPlatformVoucher = async (req, res) => {
       globalUsageLimit,
       perCustomerLimit,
       restaurantId,
+      pointsCost,
     } = req.body;
 
     const uppercaseCode = code.toUpperCase().trim();
@@ -124,6 +125,7 @@ exports.createPlatformVoucher = async (req, res) => {
       restaurantId: restaurantId || null,
       createdBy: req.user._id,
       status: initialStatus,
+      pointsCost: type === 'loyalty' ? (parseInt(pointsCost) || 0) : 0,
     });
 
     await voucher.save();
@@ -165,6 +167,7 @@ exports.updateAdminVoucher = async (req, res) => {
       maxDiscountAmount,
       globalUsageLimit,
       perCustomerLimit,
+      pointsCost,
     } = req.body;
 
     const voucher = await Voucher.findById(id);
@@ -183,6 +186,9 @@ exports.updateAdminVoucher = async (req, res) => {
     if (campaignId !== undefined) voucher.campaignId = campaignId || null;
     if (minOrderAmount !== undefined) voucher.minOrderAmount = minOrderAmount;
     if (maxDiscountAmount !== undefined) voucher.maxDiscountAmount = maxDiscountAmount;
+    if (pointsCost !== undefined) {
+      voucher.pointsCost = parseInt(pointsCost) || 0;
+    }
     
     if (globalUsageLimit !== undefined) {
       const limit = globalUsageLimit ? parseInt(globalUsageLimit) : null;
