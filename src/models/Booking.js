@@ -100,7 +100,7 @@ const bookingSchema = new mongoose.Schema(
     },
     cancelledBy: {
       type: String,
-      enum: ['customer', 'restaurant', 'admin', null],
+      enum: ['customer', 'restaurant', 'admin', 'system', null],
       default: null,
     },
     cancelledAt: {
