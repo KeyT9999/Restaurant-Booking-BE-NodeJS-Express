@@ -1,6 +1,7 @@
 'use strict';
 
 const { createHybridRecommenderService } = require('../../recommendation/hybrid-recommender.service');
+const restaurantQueryService = require('../../restaurant-query.service');
 const { HYBRID_RECOMMENDER_VERSION } = require('../../recommendation/recommendation-constants');
 const { normalizeToken } = require('../../recommendation/recommendation-utils');
 const { makeToolError } = require('./public-customer.tools');
@@ -146,6 +147,52 @@ const buildMenuQuery = (limit, safeContext) => ({
   maxPrice: normalizeBudgetToMaxPrice(safeContext.budget),
 });
 
+const mapBudgetToPublicPriceRange = (value) => {
+  const normalized = normalizeBudgetToPriceRange(value);
+  if (normalized === 'budget') return 'low';
+  if (normalized === 'moderate') return 'medium';
+  if (normalized === 'expensive' || normalized === 'luxury') return 'high';
+  return null;
+};
+
+const buildPublicRestaurantFallbackQuery = (limit, safeContext) => ({
+  search: safeContext.cuisine || '',
+  cuisineType: safeContext.cuisine || '',
+  city: safeContext.location || '',
+  priceRange: mapBudgetToPublicPriceRange(safeContext.budget) || '',
+  limit,
+  page: 1,
+  boostPlacement: 'ai_suggestion',
+  sortBy: 'averageRating',
+  sortDir: 'desc',
+});
+
+const buildPublicRestaurantFallbackQueries = (limit, safeContext) => {
+  const baseQuery = buildPublicRestaurantFallbackQuery(limit, safeContext);
+
+  return [
+    baseQuery,
+    {
+      ...baseQuery,
+      search: '',
+      cuisineType: '',
+    },
+    {
+      ...baseQuery,
+      search: '',
+      cuisineType: '',
+      city: '',
+    },
+    {
+      ...baseQuery,
+      search: '',
+      cuisineType: '',
+      city: '',
+      priceRange: '',
+    },
+  ];
+};
+
 const sanitizeRestaurantItem = (item) => ({
   id: item.restaurantId,
   itemType: 'restaurant',
@@ -161,6 +208,24 @@ const sanitizeRestaurantItem = (item) => ({
     available: true,
     detailUrl: `/restaurants/${item.restaurantId}`,
     bookingUrl: `/restaurants/${item.restaurantId}`,
+  },
+});
+
+const sanitizePublicRestaurantFallbackItem = (item) => ({
+  id: item.id,
+  itemType: 'restaurant',
+  name: item.name,
+  image: item.coverImageUrl || item.coverImage || item.primaryImage || item.logo || null,
+  ratingAverage: item.averageRating || 0,
+  priceRange: item.priceRange || null,
+  cuisineTypes: item.cuisineTypes || (item.cuisineType ? [item.cuisineType] : []),
+  score: null,
+  reasons: ['Pho bien tren BookEat'],
+  metadata: {
+    restaurantId: item.id,
+    available: true,
+    detailUrl: `/restaurants/${item.id}`,
+    bookingUrl: `/restaurants/${item.id}`,
   },
 });
 
@@ -215,6 +280,42 @@ const logRecommendationToolResult = ({
   );
 };
 
+const loadPublicRestaurantFallbackItems = async (limit, safeContext) => {
+  const attempts = buildPublicRestaurantFallbackQueries(limit, safeContext);
+
+  for (const query of attempts) {
+    const data = await restaurantQueryService.searchPublicRestaurants(query);
+    const items = (data?.restaurants || [])
+      .slice(0, limit)
+      .map(sanitizePublicRestaurantFallbackItem);
+
+    if (items.length > 0) {
+      return items;
+    }
+  }
+
+  return [];
+};
+
+const withPublicRestaurantFallback = async ({
+  items,
+  limit,
+  safeContext,
+  requestType,
+  fallbackUsed,
+}) => {
+  if (Array.isArray(items) && items.length > 0) return items;
+  if (requestType === 'menu_item') return items;
+  if (fallbackUsed !== true) return items;
+
+  try {
+    return await loadPublicRestaurantFallbackItems(limit, safeContext);
+  } catch (error) {
+    console.warn(`[AI Recommendation Tool] public fallback unavailable code=${error.code || error.message}`);
+    return items;
+  }
+};
+
 const createRecommendationTools = ({
   hybridRecommender = createHybridRecommenderService(),
 } = {}) => ({
@@ -230,7 +331,13 @@ const createRecommendationTools = ({
           actor,
           query: buildRestaurantQuery(limit, safeContext),
         });
-        const items = (result?.data?.items || []).map(sanitizeRestaurantItem);
+        const items = await withPublicRestaurantFallback({
+          items: (result?.data?.items || []).map(sanitizeRestaurantItem),
+          limit,
+          safeContext,
+          requestType: 'restaurant',
+          fallbackUsed: result?.data?.fallbackUsed === true,
+        });
         const payload = {
           requestType: 'restaurant',
           algorithm: result?.data?.algorithm || HYBRID_RECOMMENDER_VERSION,
@@ -317,6 +424,14 @@ const createRecommendationTools = ({
             || left.name.localeCompare(right.name)
           ))
           .slice(0, limit);
+        const fallbackUsed = restaurants?.data?.fallbackUsed === true || menuItems?.data?.fallbackUsed === true;
+        const resolvedItems = await withPublicRestaurantFallback({
+          items,
+          limit,
+          safeContext,
+          requestType: 'mixed',
+          fallbackUsed,
+        });
 
         const payload = {
           requestType: 'mixed',
@@ -324,10 +439,10 @@ const createRecommendationTools = ({
             || menuItems?.data?.algorithm
             || HYBRID_RECOMMENDER_VERSION,
           personalized: restaurants?.data?.personalized === true || menuItems?.data?.personalized === true,
-          fallbackUsed: restaurants?.data?.fallbackUsed === true || menuItems?.data?.fallbackUsed === true,
-          items,
+          fallbackUsed,
+          items: resolvedItems,
           message: buildAssistantMessage({
-            fallbackUsed: restaurants?.data?.fallbackUsed === true || menuItems?.data?.fallbackUsed === true,
+            fallbackUsed,
             requestType: 'mixed',
           }),
           sourceLabel: 'BookEat personalized recommendations',

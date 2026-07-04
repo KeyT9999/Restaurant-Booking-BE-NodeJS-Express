@@ -224,6 +224,7 @@ const createAiController = ({
           fallbackEnabled: false,
           openaiConfigured: false,
           groqConfigured: false,
+          nvidiaConfigured: false,
           phase: 10,
           mockEnabled: isMockEnabled(),
           publicToolsEnabled: false,
@@ -255,6 +256,7 @@ const createAiController = ({
         fallbackEnabled: providerHealth.fallbackEnabled,
         openaiConfigured: providerHealth.openaiConfigured,
         groqConfigured: providerHealth.groqConfigured,
+        nvidiaConfigured: providerHealth.nvidiaConfigured,
         phase: 10,
         mockEnabled: isMockEnabled(),
         publicToolsEnabled: Boolean(config.publicToolsEnabled),
@@ -368,6 +370,7 @@ const createAiController = ({
     let sequence = 0;
     let providerCompleted = false;
     let streamClosed = false;
+    let hasStructuredResult = false;
 
     const handleClose = () => {
       streamClosed = true;
@@ -462,6 +465,7 @@ const createAiController = ({
           message: event.message,
         });
       } else if (event.type === 'result') {
+        hasStructuredResult = true;
         streamService.writeSseEvent(res, 'result', {
           requestId: req.aiRequestId,
           sequence: sequence++,
@@ -500,6 +504,23 @@ const createAiController = ({
         status: 'failed',
         errorCode: safeError.code,
       };
+
+      const shouldSuppressErrorAfterResult = hasStructuredResult && safeError.retryable;
+      if (shouldSuppressErrorAfterResult) {
+        req.aiTelemetry.status = 'success';
+        req.aiTelemetry.errorCode = null;
+        console.warn(`[AI] requestId=${req.aiRequestId} suppressing post-result error code=${safeError.code}${getProviderCauseForLog(error)}`);
+        if (!providerCompleted && !streamClosed) {
+          streamService.writeSseEvent(res, 'completed', {
+            requestId: req.aiRequestId,
+            sequence: sequence++,
+            usage: req.aiTelemetry.usage || { inputTokens: 0, outputTokens: 0 },
+          });
+          providerCompleted = true;
+        }
+        return undefined;
+      }
+
       console.error(`[AI] requestId=${req.aiRequestId} code=${safeError.code}${getProviderCauseForLog(error)}`);
 
       const canUseMockFallback = sequence === 1

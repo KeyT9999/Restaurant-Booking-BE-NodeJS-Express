@@ -1,6 +1,7 @@
 'use strict';
 
 const Restaurant = require('../models/Restaurant');
+const { PUBLIC_RESTAURANT_FILTER } = require('./restaurant-query.service');
 
 const DEFAULT_MAX_DISTANCE_M = 5000; // 5km default
 const DEFAULT_MIN_RATING = 0;
@@ -150,9 +151,7 @@ const createLocationRecommendationService = (dependencies = {}) => {
 
     // Build match conditions
     const matchConditions = {
-      approvalStatus: 'approved',
-      active: true,
-      deletedAt: null,
+      ...PUBLIC_RESTAURANT_FILTER,
       'location.coordinates': { $exists: true, $ne: null }, // Must have GeoJSON location
     };
 
@@ -212,9 +211,7 @@ const createLocationRecommendationService = (dependencies = {}) => {
       console.log('[LocationRecommendation] No results with geoNear, trying fallback...');
       
       const fallbackQuery = {
-        approvalStatus: 'approved',
-        active: true,
-        deletedAt: null,
+        ...PUBLIC_RESTAURANT_FILTER,
       };
       
       if (category) {

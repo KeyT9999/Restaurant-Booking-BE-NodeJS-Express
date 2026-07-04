@@ -25,6 +25,7 @@ const publicCustomerToolMetadata = Object.freeze([
     access: 'public',
     allowedRoles: PUBLIC_TOOL_ROLES,
     resultType: 'restaurant_list',
+    streamBehavior: 'result_only',
     schema: withObjectSchema({
       query: {
         type: ['string', 'null'],
@@ -55,7 +56,7 @@ const publicCustomerToolMetadata = Object.freeze([
         maximum: 5,
         description: 'Maximum restaurants to return in chat.',
       },
-    }, ['query', 'cuisineType', 'city', 'priceRange', 'limit']),
+    }),
   },
   {
     name: 'get_restaurant_detail',
@@ -64,6 +65,7 @@ const publicCustomerToolMetadata = Object.freeze([
     access: 'public',
     allowedRoles: PUBLIC_TOOL_ROLES,
     resultType: 'restaurant_detail',
+    streamBehavior: 'result_only',
     schema: withObjectSchema({
       restaurantId: {
         type: 'string',
@@ -79,6 +81,7 @@ const publicCustomerToolMetadata = Object.freeze([
     access: 'public',
     allowedRoles: PUBLIC_TOOL_ROLES,
     resultType: 'menu_list',
+    streamBehavior: 'result_only',
     schema: withObjectSchema({
       restaurantId: {
         type: 'string',
@@ -108,7 +111,7 @@ const publicCustomerToolMetadata = Object.freeze([
         maximum: 10,
         description: 'Maximum menu items to return in chat.',
       },
-    }, ['restaurantId', 'query', 'categoryId', 'maxPrice', 'limit']),
+    }, ['restaurantId']),
   },
   {
     name: 'get_booking_policy',
@@ -117,6 +120,7 @@ const publicCustomerToolMetadata = Object.freeze([
     access: 'public',
     allowedRoles: PUBLIC_TOOL_ROLES,
     resultType: 'policy_answer',
+    streamBehavior: 'result_only',
     schema: withObjectSchema({
       restaurantId: {
         type: ['string', 'null'],
@@ -128,7 +132,7 @@ const publicCustomerToolMetadata = Object.freeze([
         enum: ['booking', 'cancellation', 'deposit', 'general', null],
         description: 'Policy topic requested by the user.',
       },
-    }, ['restaurantId', 'topic']),
+    }),
   },
 ]);
 
@@ -142,6 +146,7 @@ const phase7KnowledgeToolMetadata = Object.freeze([
     effect: 'read',
     cachePolicy: 'safe-static',
     resultType: 'knowledge_answer',
+    streamBehavior: 'result_only',
     featureFlag: 'knowledgeSearchEnabled',
     schema: withObjectSchema({
       query: {
@@ -161,7 +166,7 @@ const phase7KnowledgeToolMetadata = Object.freeze([
         maximum: 5,
         description: 'Maximum internal sources to return.',
       },
-    }, ['query', 'category', 'limit']),
+    }, ['query']),
   },
 ]);
 
@@ -604,6 +609,7 @@ const phase4ToolMetadata = Object.freeze([
     effect: 'read',
     cachePolicy: 'none',
     resultType: 'availability_result',
+    streamBehavior: 'result_only',
     featureFlag: 'availabilityToolEnabled',
     featureFlags: ['customerDynamicToolsEnabled', 'availabilityToolEnabled'],
     schema: withObjectSchema({
@@ -639,6 +645,7 @@ const phase4ToolMetadata = Object.freeze([
     effect: 'read',
     cachePolicy: 'none',
     resultType: 'voucher_result',
+    streamBehavior: 'result_only',
     featureFlag: 'voucherToolEnabled',
     featureFlags: ['customerDynamicToolsEnabled', 'voucherToolEnabled'],
     schema: withObjectSchema({
@@ -659,7 +666,7 @@ const phase4ToolMetadata = Object.freeze([
         maximum: 1000000000,
         description: 'Customer-provided estimated order/deposit amount in VND. Use null and ask if missing; never invent this amount.',
       },
-    }, ['code', 'restaurantId', 'orderAmountEstimate']),
+    }, ['code']),
   },
 ]);
 
@@ -673,6 +680,7 @@ const phase5ToolMetadata = Object.freeze([
     effect: 'prepare',
     cachePolicy: 'none',
     resultType: 'booking_preview',
+    streamBehavior: 'result_only',
     featureFlag: 'bookingPreviewToolEnabled',
     featureFlags: ['customerDynamicToolsEnabled', 'bookingPreviewToolEnabled'],
     schema: withObjectSchema({
@@ -763,16 +771,6 @@ const phase5ToolMetadata = Object.freeze([
       'bookingDate',
       'bookingTime',
       'numberOfGuests',
-      'customerName',
-      'customerPhone',
-      'customerEmail',
-      'tableNumbers',
-      'tableId',
-      'voucherCode',
-      'voucherId',
-      'specialRequests',
-      'note',
-      'occasion',
     ]),
   },
   {
@@ -782,11 +780,12 @@ const phase5ToolMetadata = Object.freeze([
     access: 'public',
     allowedRoles: PUBLIC_TOOL_ROLES,
     resultType: 'personalized_recommendations',
+    streamBehavior: 'result_only',
     featureFlags: ['customerDynamicToolsEnabled'],
     schema: withObjectSchema({
       type: {
-        type: 'string',
-        description: 'Type of recommendation requested: restaurant, menu_item, or mixed.',
+        type: ['string', 'null'],
+        description: 'Type of recommendation requested: restaurant, menu_item, or mixed. Use null when the user asks generally and the tool should default safely.',
       },
       limit: {
         type: ['integer', 'null'],
@@ -796,9 +795,49 @@ const phase5ToolMetadata = Object.freeze([
       },
       context: {
         type: ['object', 'null'],
-        description: 'Optional recommendation context.',
+        additionalProperties: false,
+        properties: {
+          budget: {
+            type: ['string', 'null'],
+            minLength: 1,
+            maxLength: 80,
+            description: 'Optional budget preference such as binh dan, trung cap, sang trong.',
+          },
+          cuisine: {
+            type: ['string', 'null'],
+            minLength: 1,
+            maxLength: 80,
+            description: 'Optional cuisine preference.',
+          },
+          location: {
+            type: ['string', 'null'],
+            minLength: 1,
+            maxLength: 120,
+            description: 'Optional city, district, or nearby preference.',
+          },
+          numberOfGuests: {
+            type: ['integer', 'null'],
+            minimum: 1,
+            maximum: 20,
+            description: 'Optional party size.',
+          },
+          occasion: {
+            type: ['string', 'null'],
+            minLength: 1,
+            maxLength: 80,
+            description: 'Optional occasion such as date, family, business.',
+          },
+          preferredTime: {
+            type: ['string', 'null'],
+            minLength: 1,
+            maxLength: 40,
+            description: 'Optional preferred time such as 15:00, buoi chieu, toi nay.',
+          },
+        },
+        required: [],
+        description: 'Optional recommendation context extracted from the conversation.',
       },
-    }, ['type', 'limit', 'context']),
+    }),
   },
 ]);
 
