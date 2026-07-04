@@ -134,6 +134,7 @@ userSchema.methods.toPublicJSON = function () {
     address: this.address,
     role: this.role,
     avatarUrl: this.avatarUrl,
+    isGoogleAccount: Boolean(this.googleId),
     emailVerified: this.emailVerified,
     active: this.active,
     lastLogin: this.lastLogin,

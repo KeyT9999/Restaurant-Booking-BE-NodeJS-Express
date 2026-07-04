@@ -65,6 +65,26 @@ const safeParseArguments = (rawArguments) => {
 
 const schemaTypes = (schema) => (Array.isArray(schema.type) ? schema.type : [schema.type]);
 
+const coerceValue = (schema, value) => {
+  const types = schemaTypes(schema);
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+
+    if (trimmed === 'null' && types.includes('null')) return null;
+    if (trimmed === 'true' && types.includes('boolean')) return true;
+    if (trimmed === 'false' && types.includes('boolean')) return false;
+    if (/^-?\d+$/.test(trimmed) && types.includes('integer')) return Number(trimmed);
+    if (/^-?(?:\d+|\d*\.\d+)$/.test(trimmed) && types.includes('number')) return Number(trimmed);
+  }
+
+  if (Array.isArray(value) && schema.items) {
+    return value.map((item) => coerceValue(schema.items, item));
+  }
+
+  return value;
+};
+
 const validateValue = (schema, value, path) => {
   const types = schemaTypes(schema);
   if (value === null) {
@@ -171,7 +191,10 @@ const validateArguments = (schema, args) => {
   }
 
   for (const [key, value] of Object.entries(args)) {
-    validateValue(schema.properties[key], value, key);
+    const propertySchema = schema.properties[key];
+    const coercedValue = coerceValue(propertySchema, value);
+    args[key] = coercedValue;
+    validateValue(propertySchema, coercedValue, key);
   }
 
   return args;
@@ -471,7 +494,7 @@ const createAiToolRunner = ({
           error: {
             code: runnerError.code,
             message: getPublicToolMessage(runnerError.code),
-            ...(runnerError.details ? { details: runnerError.details } : {}),
+            details: runnerError.details || runnerError.message || null,
           },
           ...(result ? { result: sanitizeToolResultForLlm(result, toolName) } : {}),
         },

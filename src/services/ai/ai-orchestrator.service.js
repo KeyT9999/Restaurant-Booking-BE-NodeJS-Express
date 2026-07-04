@@ -30,6 +30,12 @@ const estimateTokens = (text) => {
   return Math.ceil(text.length / 4);
 };
 
+const shouldEndStreamAfterToolResult = (tool, executableCalls, toolResult) => (
+  Boolean(toolResult?.result)
+  && executableCalls.length === 1
+  && tool?.streamBehavior === 'result_only'
+);
+
 const applyTokenBudgetGuard = (instructions, input, maxBudgetTokens = 3000) => {
   const instructionsTokens = estimateTokens(instructions);
   let totalTokens = instructionsTokens + input.reduce((acc, msg) => {
@@ -238,6 +244,11 @@ const createAiOrchestrator = ({
               tool: call.name,
               result: toolResult.result,
             };
+          }
+
+          if (shouldEndStreamAfterToolResult(tool, executableCalls, toolResult)) {
+            yield { type: 'completed', usage };
+            return;
           }
 
           toolInputItems.push(makeFunctionCallInputItem(call));

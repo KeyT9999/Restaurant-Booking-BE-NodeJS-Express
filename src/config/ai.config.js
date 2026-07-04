@@ -46,8 +46,8 @@ const parseProvider = (env, name, defaultValue) => {
   if (rawValue === undefined || rawValue === '') return defaultValue;
 
   const value = String(rawValue).trim().toLowerCase();
-  if (['openai', 'groq'].includes(value)) return value;
-  throw new AiConfigError(name, `${name} must be openai or groq`);
+  if (['openai', 'groq', 'nvidia'].includes(value)) return value;
+  throw new AiConfigError(name, `${name} must be openai, groq or nvidia`);
 };
 
 const parseUrl = (env, name, defaultValue) => {
@@ -88,6 +88,10 @@ const getAiConfig = (env = process.env) => {
     groqModel: parseModel(env, 'GROQ_MODEL', 'openai/gpt-oss-120b'),
     groqBaseUrl: parseUrl(env, 'GROQ_BASE_URL', 'https://api.groq.com/openai/v1'),
     groqTimeoutMs: parseInteger(env, 'GROQ_TIMEOUT_MS', 30000, { min: 1000, max: 120000 }),
+    nvidiaApiKey: (env.NVIDIA_API_KEY || '').trim(),
+    nvidiaModel: parseModel(env, 'NVIDIA_MODEL', 'stepfun-ai/step-3.7-flash'),
+    nvidiaBaseUrl: parseUrl(env, 'NVIDIA_BASE_URL', 'https://integrate.api.nvidia.com/v1'),
+    nvidiaTimeoutMs: parseInteger(env, 'NVIDIA_TIMEOUT_MS', 30000, { min: 1000, max: 120000 }),
     toolTimeoutMs: parseInteger(env, 'AI_TOOL_TIMEOUT_MS', 10000, { min: 100, max: 60000 }),
     maxInputChars: parseInteger(env, 'AI_MAX_INPUT_CHARS', 2000, { min: 1, max: 20000 }),
     maxHistoryMessages: parseInteger(env, 'AI_MAX_HISTORY_MESSAGES', 8, { min: 0, max: 20 }),
