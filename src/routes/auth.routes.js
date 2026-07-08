@@ -37,10 +37,14 @@ const setupGoogleRoutes = () => {
       // Bước 1: Redirect sang Google để user đăng nhập
       router.get(
         '/google',
-        passport.authenticate('google', {
-          scope  : ['profile', 'email'],
-          session: false,
-        })
+        (req, res, next) => {
+          const { state } = req.query;
+          passport.authenticate('google', {
+            scope  : ['profile', 'email'],
+            session: false,
+            state  : state
+          })(req, res, next);
+        }
       );
 
       // Bước 2: Google callback sau khi user đồng ý
@@ -63,5 +67,8 @@ const setupGoogleRoutes = () => {
 };
 
 setupGoogleRoutes();
+
+// Mobile Google Sign-In verification route (Native Google Auth)
+router.post('/google/mobile', authController.googleMobileLogin);
 
 module.exports = router;

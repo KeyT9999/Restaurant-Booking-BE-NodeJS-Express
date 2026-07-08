@@ -139,7 +139,7 @@ exports.getPlatformVouchers = async (req, res) => {
     const { page = 1, limit = 10 } = req.query;
 
     const filter = {
-      type: { $in: ['platform', 'loyalty'] },
+      type: { $in: ['platform', 'loyalty', 'restaurant'] },
       status: 'active',
       startDate: { $lte: now },
       $or: [
@@ -152,6 +152,7 @@ exports.getPlatformVouchers = async (req, res) => {
 
     const [vouchers, total] = await Promise.all([
       Voucher.find(filter)
+        .populate('restaurantId', 'name logo')
         .sort({ priority: -1, createdAt: -1 })
         .skip(skipIndex)
         .limit(parseInt(limit)),
