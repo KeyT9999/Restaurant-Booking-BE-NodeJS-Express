@@ -571,22 +571,149 @@ const googleNotConfigured = (req, res) =>
 const googleCallback = (req, res) => {
   try {
     const user = req.user;
+    const state = req.query.state;
+    
+    let frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    if (state && (state.startsWith('bookeatreactnative://') || state.startsWith('exp://') || state === 'mobile')) {
+      frontendUrl = state === 'mobile' ? 'bookeatreactnative://google-callback' : state;
+    }
+
+    const isMobile = frontendUrl.startsWith('bookeatreactnative://') || frontendUrl.startsWith('exp://');
+
     if (!user) {
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-      return res.redirect(`${frontendUrl}/auth/google/callback?error=no_user`);
+      const redirectUrl = isMobile 
+        ? `${frontendUrl}?error=no_user`
+        : `${frontendUrl}/auth/google/callback?error=no_user`;
+      return res.redirect(redirectUrl);
     }
 
     const tokenData   = signToken(user);
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
     const params      = new URLSearchParams({
       token     : tokenData.access_token,
-      expires_in: tokenData.expires_in,
+      expires_in: String(tokenData.expires_in),
     });
 
-    return res.redirect(`${frontendUrl}/auth/google/callback?${params.toString()}`);
+    const redirectUrl = isMobile
+      ? `${frontendUrl}?${params.toString()}`
+      : `${frontendUrl}/auth/google/callback?${params.toString()}`;
+    return res.redirect(redirectUrl);
   } catch (error) {
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-    return res.redirect(`${frontendUrl}/auth/google/callback?error=server_error`);
+    const state = req.query.state;
+    let frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    if (state && (state.startsWith('bookeatreactnative://') || state.startsWith('exp://') || state === 'mobile')) {
+      frontendUrl = state === 'mobile' ? 'bookeatreactnative://google-callback' : state;
+    }
+    const isMobile = frontendUrl.startsWith('bookeatreactnative://') || frontendUrl.startsWith('exp://');
+    const redirectUrl = isMobile
+      ? `${frontendUrl}?error=server_error`
+      : `${frontendUrl}/auth/google/callback?error=server_error`;
+    return res.redirect(redirectUrl);
+  }
+};
+
+const googleMobileLogin = async (req, res) => {
+  try {
+    const { token, tokenType = 'access' } = req.body;
+
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: 'Mã xác thực Google là bắt buộc',
+      });
+    }
+
+    const axios = require('axios');
+    let googleId, email, fullName, avatarUrl;
+
+    if (tokenType === 'id') {
+      const googleRes = await axios.get(`https://oauth2.googleapis.com/tokeninfo?id_token=${token}`);
+      const profile = googleRes.data;
+      
+      if (profile.error || profile.error_description) {
+        return res.status(400).json({
+          success: false,
+          message: profile.error_description || 'Mã ID Token không hợp lệ',
+        });
+      }
+      
+      googleId = profile.sub;
+      email = profile.email;
+      fullName = profile.name || 'Google User';
+      avatarUrl = profile.picture || null;
+    } else {
+      // Access token
+      const googleRes = await axios.get('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const profile = googleRes.data;
+      
+      googleId = profile.sub;
+      email = profile.email;
+      fullName = profile.name || 'Google User';
+      avatarUrl = profile.picture || null;
+    }
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Không lấy được thông tin email từ Google',
+      });
+    }
+
+    // Find or create user
+    let user = await User.findOne({
+      $or: [{ googleId }, { email }],
+    });
+
+    if (user) {
+      if (!user.googleId) {
+        user.googleId = googleId;
+      }
+      if (!user.avatarUrl && avatarUrl) {
+        user.avatarUrl = avatarUrl;
+      }
+      user.lastLogin = new Date();
+      await user.save({ validateBeforeSave: false });
+    } else {
+      // Create user
+      const baseUsername = email.split('@')[0].replace(/[^a-zA-Z0-9_]/g, '_');
+      let username = baseUsername;
+      let counter = 1;
+
+      while (await User.exists({ username })) {
+        username = `${baseUsername}_${counter++}`;
+      }
+
+      user = await User.create({
+        googleId,
+        email,
+        username,
+        fullName,
+        avatarUrl,
+        emailVerified: true,
+        active: true,
+        role: 'customer',
+        lastLogin: new Date(),
+      });
+    }
+
+    const tokenData = signToken(user);
+    return res.json({
+      success: true,
+      message: 'Đăng nhập Google thành công',
+      data: {
+        user: user.toPublicJSON(),
+        token: tokenData.access_token,
+        expiresIn: tokenData.expires_in
+      }
+    });
+  } catch (error) {
+    console.error('Lỗi đăng nhập Google Native:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Lỗi xác thực thông tin tài khoản Google với máy chủ',
+      error: error.message
+    });
   }
 };
 
@@ -604,6 +731,7 @@ module.exports = {
   logout,
   googleNotConfigured,
   googleCallback,
+  googleMobileLogin,
   verifyEmail,
   resendVerification,
   forgotPassword,

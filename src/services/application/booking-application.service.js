@@ -257,10 +257,36 @@ const createBookingApplicationService = ({
           tableNumber: { $in: assignedTables },
         });
       }
-      const depositAmount = tableRecords.reduce(
+      const tableDepositAmount = tableRecords.reduce(
         (sum, table) => sum + Math.max(0, Number(table.depositAmount) || 0),
         0,
       );
+
+      let preOrderItems = [];
+      let foodTotalAmount = 0;
+      if (Array.isArray(command.preOrderItems) && command.preOrderItems.length > 0) {
+        const MenuItem = mongoose.model('MenuItem');
+        const itemIds = command.preOrderItems.map(item => item.menuItemId);
+        const menuItems = await MenuItem.find({ _id: { $in: itemIds } });
+
+        preOrderItems = command.preOrderItems.map(item => {
+          const menuItem = menuItems.find(m => m._id.toString() === item.menuItemId.toString());
+          const price = menuItem ? menuItem.price : 0;
+          const name = menuItem ? menuItem.name : 'Món ăn';
+          const qty = Math.max(1, Number(item.quantity) || 1);
+          foodTotalAmount += price * qty;
+
+          return {
+            menuItemId: item.menuItemId,
+            nameSnapshot: name,
+            priceSnapshot: price,
+            quantity: qty,
+            note: item.note || null,
+          };
+        });
+      }
+
+      const depositAmount = tableDepositAmount + Math.round(0.1 * foodTotalAmount);
 
       let voucherId = null;
       let discountAmount = 0;
@@ -316,7 +342,10 @@ const createBookingApplicationService = ({
         depositAmount,
         discountAmount,
         voucherId,
+        originalAmount: depositAmount,
+        finalAmount: Math.max(0, depositAmount - discountAmount),
         sourceAiPendingActionId,
+        preOrderItems,
         status: 'pending',
         statusHistory: [{
           status: 'pending',
