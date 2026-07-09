@@ -63,7 +63,7 @@ const getRestaurantReviewsForOwner = async (req, res) => {
 
     const [reviews, total] = await Promise.all([
       Review.find(reviewQuery)
-        .populate('customerId', 'fullName avatarUrl email')
+        .populate('userId', 'fullName avatarUrl email')
         .populate('bookingId', 'bookingDate bookingTime')
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -76,11 +76,11 @@ const getRestaurantReviewsForOwner = async (req, res) => {
       data: {
         reviews: reviews.map((r) => {
           const item = r.toPublicJSON();
-          if (r.customerId) {
+          if (r.userId) {
             item.customer = {
-              fullName: r.customerId.fullName,
-              avatarUrl: r.customerId.avatarUrl,
-              email: r.customerId.email,
+              fullName: r.userId.fullName,
+              avatarUrl: r.userId.avatarUrl,
+              email: r.userId.email,
             };
           }
           if (r.bookingId) {

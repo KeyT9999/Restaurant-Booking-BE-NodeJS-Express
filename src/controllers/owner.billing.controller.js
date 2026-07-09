@@ -18,7 +18,7 @@ const BILLING_TARGET_TYPES = [
   'deposit_platform_fee',
 ];
 
-const getRestaurantId = (req) => req.query.restaurantId || req.body.restaurantId || req.body.targetId;
+const getRestaurantId = (req) => req.query?.restaurantId || req.body?.restaurantId || req.body?.targetId;
 
 const normalizePlan = (plan) => ({
   key: plan.code,
