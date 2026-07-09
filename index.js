@@ -102,6 +102,7 @@ apiRouter.use('/bookings',    require('./src/routes/booking.routes'));
 apiRouter.use('/waitlists',   require('./src/routes/waitlist.routes'));
 apiRouter.use('/owner',       require('./src/routes/owner.booking.routes'));
 apiRouter.use('/owner',       require('./src/routes/owner.billing.routes'));
+apiRouter.use('/owner',       require('./src/routes/owner.review.routes'));
 apiRouter.use('/payments',    require('./src/routes/payment.routes'));
 apiRouter.use('/webhooks',    require('./src/routes/webhook.routes'));
 apiRouter.use('/refunds',     require('./src/routes/refund.routes'));
