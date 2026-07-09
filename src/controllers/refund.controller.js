@@ -135,7 +135,7 @@ exports.approveRefund = async (req, res) => {
 
     refund.status = 'approved';
     refund.approvedBy = req.user._id;
-    refund.adminNote = req.body.adminNote || 'Đã duyệt';
+    refund.adminNote = (req.body || {}).adminNote || 'Đã duyệt';
     await refund.save();
     sendNotification(
       notificationService.notifyRefundStatus(req.app?.get?.('io') || null, { refund, status: 'approved' }),
@@ -159,7 +159,7 @@ exports.rejectRefund = async (req, res) => {
 
     refund.status = 'rejected';
     refund.approvedBy = req.user._id;
-    refund.adminNote = req.body.adminNote || 'Từ chối';
+    refund.adminNote = (req.body || {}).adminNote || 'Từ chối';
     await refund.save();
     sendNotification(
       notificationService.notifyRefundStatus(req.app?.get?.('io') || null, { refund, status: 'rejected' }),
@@ -175,7 +175,7 @@ exports.rejectRefund = async (req, res) => {
 // ─── POST /api/v1/admin/refunds/:id/process ───
 exports.processRefund = async (req, res) => {
   try {
-    const { adminNote, gatewayRefundId } = req.body;
+    const { adminNote, gatewayRefundId } = req.body || {};
     const refund = await Refund.findById(req.params.id);
     if (!refund) return res.status(404).json({ success: false, message: 'Refund không tồn tại.' });
 

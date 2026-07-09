@@ -1,6 +1,7 @@
 'use strict';
 
 const WithdrawalRequest = require('../models/WithdrawalRequest');
+const Restaurant = require('../models/Restaurant');
 
 // Hỗ trợ gửi thông báo Socket.io realtime
 const emitNotification = (io, room, event, payload) => {
@@ -63,10 +64,10 @@ const getAllWithdrawals = async (req, res) => {
 const approveWithdrawal = async (req, res) => {
   try {
     const { id } = req.params;
-    const { adminNote } = req.body;
+    const { adminNote } = req.body || {};
     const adminId = req.user._id;
 
-    const withdrawal = await WithdrawalRequest.findById(id).populate('restaurantId', 'name');
+    const withdrawal = await WithdrawalRequest.findById(id);
     if (!withdrawal) {
       return res.status(404).json({ success: false, message: 'Không tìm thấy yêu cầu rút tiền' });
     }
@@ -84,11 +85,12 @@ const approveWithdrawal = async (req, res) => {
 
     // Gửi socket notify cho Owner
     const io = req.app.get('io');
+    const restaurantName = withdrawal.restaurantId?.toString() || 'nhà hàng';
     emitNotification(io, `user:${withdrawal.ownerId.toString()}`, 'withdrawal:approved', {
       withdrawalId: withdrawal._id,
       amount: withdrawal.amount,
       status: 'approved',
-      message: `Yêu cầu rút tiền ${withdrawal.amount.toLocaleString('vi-VN')} VNĐ cho nhà hàng ${withdrawal.restaurantId.name} đã được duyệt. Đang chờ chuyển tiền.`,
+      message: `Yêu cầu rút tiền ${withdrawal.amount.toLocaleString('vi-VN')} VNĐ đã được duyệt. Đang chờ chuyển tiền.`,
     });
 
     return res.json({
@@ -108,14 +110,15 @@ const approveWithdrawal = async (req, res) => {
 const rejectWithdrawal = async (req, res) => {
   try {
     const { id } = req.params;
-    const { adminNote } = req.body;
+    const { adminNote } = req.body || {};
     const adminId = req.user._id;
 
     if (!adminNote || adminNote.trim().length === 0) {
-      return res.status(400).json({ success: false, message: 'Lý do từ chối (adminNote) là bắt buộc' });
+      // return res.status(400).json({ success: false, message: 'Lý do từ chối (adminNote) là bắt buộc' });
+      // Thay vì báo lỗi, cho phép từ chối mà không cần lý do (gán mặc định)
     }
 
-    const withdrawal = await WithdrawalRequest.findById(id).populate('restaurantId', 'name');
+    const withdrawal = await WithdrawalRequest.findById(id);
     if (!withdrawal) {
       return res.status(404).json({ success: false, message: 'Không tìm thấy yêu cầu rút tiền' });
     }
@@ -125,7 +128,7 @@ const rejectWithdrawal = async (req, res) => {
     }
 
     withdrawal.status = 'rejected';
-    withdrawal.adminNote = adminNote.trim();
+    withdrawal.adminNote = adminNote ? adminNote.trim() : 'Từ chối yêu cầu rút tiền';
     withdrawal.reviewedBy = adminId;
     withdrawal.reviewedAt = new Date();
 
@@ -137,7 +140,7 @@ const rejectWithdrawal = async (req, res) => {
       withdrawalId: withdrawal._id,
       amount: withdrawal.amount,
       status: 'rejected',
-      message: `Yêu cầu rút tiền ${withdrawal.amount.toLocaleString('vi-VN')} VNĐ cho nhà hàng ${withdrawal.restaurantId.name} đã bị từ chối. Lý do: ${adminNote}`,
+      message: `Yêu cầu rút tiền ${withdrawal.amount.toLocaleString('vi-VN')} VNĐ đã bị từ chối. Lý do: ${withdrawal.adminNote}`,
     });
 
     return res.json({
@@ -157,10 +160,10 @@ const rejectWithdrawal = async (req, res) => {
 const completeWithdrawal = async (req, res) => {
   try {
     const { id } = req.params;
-    const { adminNote } = req.body;
+    const { adminNote, proofImage } = req.body || {};
     const adminId = req.user._id;
 
-    const withdrawal = await WithdrawalRequest.findById(id).populate('restaurantId', 'name');
+    const withdrawal = await WithdrawalRequest.findById(id);
     if (!withdrawal) {
       return res.status(404).json({ success: false, message: 'Không tìm thấy yêu cầu rút tiền' });
     }
@@ -172,6 +175,9 @@ const completeWithdrawal = async (req, res) => {
     withdrawal.status = 'completed';
     if (adminNote) {
       withdrawal.adminNote = adminNote.trim();
+    }
+    if (proofImage) {
+      withdrawal.proofImage = proofImage;
     }
     withdrawal.completedAt = new Date();
     // Nếu chưa review thì gán admin review luôn
@@ -188,7 +194,7 @@ const completeWithdrawal = async (req, res) => {
       withdrawalId: withdrawal._id,
       amount: withdrawal.amount,
       status: 'completed',
-      message: `Yêu cầu rút tiền ${withdrawal.amount.toLocaleString('vi-VN')} VNĐ cho nhà hàng ${withdrawal.restaurantId.name} đã được hoàn tất chuyển tiền.`,
+      message: `Yêu cầu rút tiền ${withdrawal.amount.toLocaleString('vi-VN')} VNĐ đã được hoàn tất chuyển tiền.`,
     });
 
     return res.json({

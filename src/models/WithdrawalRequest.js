@@ -38,6 +38,10 @@ const withdrawalRequestSchema = new mongoose.Schema(
       default: null,
       trim: true,
     },
+    proofImage: {
+      type: String,
+      default: null,
+    },
     status: {
       type: String,
       enum: ['pending', 'approved', 'rejected', 'completed'],
