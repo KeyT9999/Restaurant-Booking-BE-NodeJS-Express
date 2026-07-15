@@ -39,6 +39,7 @@ const notificationSchema = new mongoose.Schema(
         'booking_cancelled',
         'booking_completed',
         'booking_no_show',
+        'booking_reminder',
         'payment_success',
         'payment_failed',
         'refund_requested',

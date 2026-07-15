@@ -10,6 +10,52 @@ const ROLE_ALIASES = {
   user: 'customer',
 };
 
+const LEGACY_TITLE_COPY = Object.freeze({
+  'Da gui yeu cau dat ban': 'Đã gửi yêu cầu đặt bàn',
+  'Booking da duoc xac nhan': 'Đặt bàn đã được xác nhận',
+  'Booking da bi huy': 'Đặt bàn đã bị hủy',
+  'Booking da hoan thanh': 'Đặt bàn đã hoàn thành',
+  'Booking duoc danh dau no-show': 'Đặt bàn được đánh dấu khách không đến',
+  'Thanh toan thanh cong': 'Thanh toán thành công',
+  'Thanh toan that bai': 'Thanh toán thất bại',
+  'Hoan tien da duoc duyet': 'Hoàn tiền đã được duyệt',
+  'Hoan tien bi tu choi': 'Hoàn tiền bị từ chối',
+  'Hoan tien da xu ly': 'Hoàn tiền đã xử lý',
+  'Tin nhan moi': 'Tin nhắn mới',
+});
+
+const normalizeLegacyMessage = (message) => {
+  if (!message) return message;
+
+  return String(message)
+    .replace(
+      /^(.+) se xac nhan booking (.+) cua ban\.$/u,
+      '$1 sẽ xác nhận yêu cầu đặt bàn $2 của bạn.'
+    )
+    .replace('Nha hang da xac nhan yeu cau dat ban cua ban.', 'Nhà hàng đã xác nhận yêu cầu đặt bàn của bạn.')
+    .replace('Booking da duoc cap nhat sang trang thai huy.', 'Đặt bàn đã được cập nhật sang trạng thái hủy.')
+    .replace('Booking cua ban da duoc danh dau hoan thanh.', 'Đặt bàn của bạn đã được đánh dấu hoàn thành.')
+    .replace('Nha hang da danh dau booking la khach khong den.', 'Nhà hàng đã đánh dấu khách không đến.')
+    .replace('Khoan thanh toan ', 'Khoản thanh toán ')
+    .replace(' VND da duoc ghi nhan.', ' VND đã được ghi nhận.')
+    .replace(
+      'Thanh toan chua hoan tat. Vui long thu lai hoac chon phuong thuc khac.',
+      'Thanh toán chưa hoàn tất. Vui lòng thử lại hoặc chọn phương thức khác.'
+    )
+    .replace('Yeu cau hoan tien cua ban da duoc duyet.', 'Yêu cầu hoàn tiền của bạn đã được duyệt.')
+    .replace('Yeu cau hoan tien cua ban da bi tu choi.', 'Yêu cầu hoàn tiền của bạn đã bị từ chối.')
+    .replace('Khoan hoan tien da duoc xu ly.', 'Khoản hoàn tiền đã được xử lý.')
+    .replace(' So tien: ', ' Số tiền: ')
+    .replace('Tin nhan dinh kem', 'Tin nhắn đính kèm')
+    .replace('Tin nhan moi', 'Tin nhắn mới');
+};
+
+const normalizeLegacyNotificationCopy = (data) => ({
+  ...data,
+  title: LEGACY_TITLE_COPY[data.title] || data.title,
+  message: normalizeLegacyMessage(data.message),
+});
+
 const normalizeRole = (role) => ROLE_ALIASES[role] || role;
 
 const normalizeId = (value) => {
@@ -30,10 +76,10 @@ const createHttpError = (status, message) => {
 const toClient = (notification) => {
   if (!notification) return null;
   if (typeof notification.toClientJSON === 'function') {
-    return notification.toClientJSON();
+    return normalizeLegacyNotificationCopy(notification.toClientJSON());
   }
   const doc = notification.toObject ? notification.toObject() : notification;
-  return {
+  return normalizeLegacyNotificationCopy({
     id: normalizeId(doc._id || doc.id),
     type: doc.type,
     title: doc.title,
@@ -51,7 +97,7 @@ const toClient = (notification) => {
     readAt: doc.readAt || null,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
-  };
+  });
 };
 
 const getOwnedRestaurantIds = async (userId) => {
@@ -263,8 +309,8 @@ const bookingEntity = (booking) => ({
 const notifyBookingCreated = async (io, { booking, restaurant, customer }) => createNotifications([
   {
     type: 'booking_created',
-    title: 'Booking moi',
-    message: `${booking.customerName || 'Khach hang'} dat ban ${formatDateTime(booking)} cho ${booking.numberOfGuests} khach.`,
+    title: 'Đặt bàn mới',
+    message: `${booking.customerName || 'Khách hàng'} đặt bàn ${formatDateTime(booking)} cho ${booking.numberOfGuests} khách.`,
     recipientId: restaurant?.ownerId,
     recipientRole: 'restaurant_owner',
     restaurantId: restaurant?._id || booking.restaurantId,
@@ -274,8 +320,8 @@ const notifyBookingCreated = async (io, { booking, restaurant, customer }) => cr
   },
   {
     type: 'booking_created',
-    title: 'Da gui yeu cau dat ban',
-    message: `${restaurant?.name || 'Nha hang'} se xac nhan booking ${formatDateTime(booking)} cua ban.`,
+    title: 'Đã gửi yêu cầu đặt bàn',
+    message: `${restaurant?.name || 'Nhà hàng'} sẽ xác nhận yêu cầu đặt bàn ${formatDateTime(booking)} của bạn.`,
     recipientId: booking.customerId || customer?._id,
     recipientRole: 'customer',
     restaurantId: restaurant?._id || booking.restaurantId,
@@ -288,23 +334,23 @@ const notifyBookingCreated = async (io, { booking, restaurant, customer }) => cr
 const statusCopy = {
   confirmed: {
     type: 'booking_confirmed',
-    title: 'Booking da duoc xac nhan',
-    message: 'Nha hang da xac nhan yeu cau dat ban cua ban.',
+    title: 'Đặt bàn đã được xác nhận',
+    message: 'Nhà hàng đã xác nhận yêu cầu đặt bàn của bạn.',
   },
   cancelled: {
     type: 'booking_cancelled',
-    title: 'Booking da bi huy',
-    message: 'Booking da duoc cap nhat sang trang thai huy.',
+    title: 'Đặt bàn đã bị hủy',
+    message: 'Đặt bàn đã được cập nhật sang trạng thái hủy.',
   },
   completed: {
     type: 'booking_completed',
-    title: 'Booking da hoan thanh',
-    message: 'Booking cua ban da duoc danh dau hoan thanh.',
+    title: 'Đặt bàn đã hoàn thành',
+    message: 'Đặt bàn của bạn đã được đánh dấu hoàn thành.',
   },
   no_show: {
     type: 'booking_no_show',
-    title: 'Booking duoc danh dau no-show',
-    message: 'Nha hang da danh dau booking la khach khong den.',
+    title: 'Đặt bàn được đánh dấu khách không đến',
+    message: 'Nhà hàng đã đánh dấu khách không đến.',
   },
 };
 
@@ -313,7 +359,7 @@ const notifyBookingStatusChanged = async (io, { booking, restaurant, status, rea
   if (!copy) return [];
 
   const customerMessage = status === 'cancelled' && reason
-    ? `${copy.message} Ly do: ${reason}`
+    ? `${copy.message} Lý do: ${reason}`
     : copy.message;
 
   const notifications = [
@@ -333,8 +379,8 @@ const notifyBookingStatusChanged = async (io, { booking, restaurant, status, rea
   if (actorRole === 'customer') {
     notifications.push({
       type: copy.type,
-      title: 'Booking da cap nhat',
-      message: `${booking.customerName || 'Khach hang'} da huy booking ${formatDateTime(booking)}.`,
+      title: 'Đặt bàn đã cập nhật',
+      message: `${booking.customerName || 'Khách hàng'} đã hủy đặt bàn ${formatDateTime(booking)}.`,
       recipientId: restaurant?.ownerId,
       recipientRole: 'restaurant_owner',
       restaurantId: restaurant?._id || booking.restaurantId,
@@ -350,10 +396,10 @@ const notifyBookingStatusChanged = async (io, { booking, restaurant, status, rea
 const notifyPaymentStatus = async (io, { payment, booking, restaurant, status = 'success' }) => {
   const isSuccess = status === 'success';
   const type = isSuccess ? 'payment_success' : 'payment_failed';
-  const title = isSuccess ? 'Thanh toan thanh cong' : 'Thanh toan that bai';
+  const title = isSuccess ? 'Thanh toán thành công' : 'Thanh toán thất bại';
   const message = isSuccess
-    ? `Khoan thanh toan ${Number(payment.amount || 0).toLocaleString('vi-VN')} VND da duoc ghi nhan.`
-    : 'Thanh toan chua hoan tat. Vui long thu lai hoac chon phuong thuc khac.';
+    ? `Khoản thanh toán ${Number(payment.amount || 0).toLocaleString('vi-VN')} VND đã được ghi nhận.`
+    : 'Thanh toán chưa hoàn tất. Vui lòng thử lại hoặc chọn phương thức khác.';
 
   return createNotifications([
     {
@@ -378,8 +424,8 @@ const notifyPaymentStatus = async (io, { payment, booking, restaurant, status = 
     },
     restaurant?.ownerId && booking ? {
       type,
-      title: isSuccess ? 'Khach da thanh toan coc' : 'Thanh toan booking that bai',
-      message: `${booking.customerName || 'Khach hang'}: ${message}`,
+      title: isSuccess ? 'Khách đã thanh toán cọc' : 'Thanh toán đặt bàn thất bại',
+      message: `${booking.customerName || 'Khách hàng'}: ${message}`,
       recipientId: restaurant.ownerId,
       recipientRole: 'restaurant_owner',
       restaurantId: restaurant._id,
@@ -396,8 +442,8 @@ const notifyPaymentStatus = async (io, { payment, booking, restaurant, status = 
 
 const notifyRefundRequested = async (io, { refund, payment }) => createNotification({
   type: 'refund_requested',
-  title: 'Yeu cau hoan tien moi',
-  message: `Yeu cau hoan tien ${Number(refund.amount || 0).toLocaleString('vi-VN')} VND dang cho xu ly.`,
+    title: 'Yêu cầu hoàn tiền mới',
+    message: `Yêu cầu hoàn tiền ${Number(refund.amount || 0).toLocaleString('vi-VN')} VND đang chờ xử lý.`,
   recipientRole: 'admin',
   relatedEntity: {
     entityType: 'refund',
@@ -415,18 +461,18 @@ const notifyRefundRequested = async (io, { refund, payment }) => createNotificat
 const refundStatusCopy = {
   approved: {
     type: 'refund_approved',
-    title: 'Hoan tien da duoc duyet',
-    message: 'Yeu cau hoan tien cua ban da duoc duyet.',
+    title: 'Hoàn tiền đã được duyệt',
+    message: 'Yêu cầu hoàn tiền của bạn đã được duyệt.',
   },
   rejected: {
     type: 'refund_rejected',
-    title: 'Hoan tien bi tu choi',
-    message: 'Yeu cau hoan tien cua ban da bi tu choi.',
+    title: 'Hoàn tiền bị từ chối',
+    message: 'Yêu cầu hoàn tiền của bạn đã bị từ chối.',
   },
   refunded: {
     type: 'refund_processed',
-    title: 'Hoan tien da xu ly',
-    message: 'Khoan hoan tien da duoc xu ly.',
+    title: 'Hoàn tiền đã xử lý',
+    message: 'Khoản hoàn tiền đã được xử lý.',
   },
 };
 
@@ -437,7 +483,7 @@ const notifyRefundStatus = async (io, { refund, status }) => {
   return createNotification({
     type: copy.type,
     title: copy.title,
-    message: `${copy.message} So tien: ${Number(refund.amount || 0).toLocaleString('vi-VN')} VND.`,
+    message: `${copy.message} Số tiền: ${Number(refund.amount || 0).toLocaleString('vi-VN')} VND.`,
     recipientId: refund.requestedBy,
     recipientRole: normalizeRole(refund.requestedByRole),
     relatedEntity: {
@@ -473,8 +519,8 @@ const notifyVoucherCreated = async (io, { voucher, restaurant, createdByRole }) 
   if (createdByRole === 'admin' && restaurant?.ownerId) {
     return createNotification({
       type: 'voucher_new',
-      title: 'Voucher moi cho nha hang',
-      message: `Ma ${voucher.code} da duoc tao cho ${restaurant.name}.`,
+      title: 'Voucher mới cho nhà hàng',
+      message: `Mã ${voucher.code} đã được tạo cho ${restaurant.name}.`,
       recipientId: restaurant.ownerId,
       recipientRole: 'restaurant_owner',
       restaurantId: restaurant._id,
@@ -490,8 +536,8 @@ const notifyVoucherCreated = async (io, { voucher, restaurant, createdByRole }) 
 
   return createNotification({
     type: 'voucher_new',
-    title: 'Voucher moi',
-    message: `Ma ${voucher.code} vua duoc tao${restaurant?.name ? ` cho ${restaurant.name}` : ''}.`,
+    title: 'Voucher mới',
+    message: `Mã ${voucher.code} vừa được tạo${restaurant?.name ? ` cho ${restaurant.name}` : ''}.`,
     recipientRole: 'admin',
     restaurantId: restaurant?._id || voucher.restaurantId || null,
     relatedEntity: {
@@ -512,11 +558,11 @@ const notifyChatMessage = async (io, { result, sender }) => {
   const restaurantId = normalizeId(conversation.restaurant?.id || conversation.restaurant || message.restaurantId);
   const customerId = normalizeId(conversation.customer?.id || conversation.customer);
   const restaurant = restaurantId ? await Restaurant.findById(restaurantId).select('_id ownerId name').lean() : null;
-  const preview = message.content || (message.attachments?.length ? 'Tin nhan dinh kem' : 'Tin nhan moi');
+  const preview = message.content || (message.attachments?.length ? 'Tin nhắn đính kèm' : 'Tin nhắn mới');
   const senderName = sender.fullName || sender.username || 'BookEat';
   const base = {
     type: 'chat_new_message',
-    title: 'Tin nhan moi',
+    title: 'Tin nhắn mới',
     message: `${senderName}: ${preview}`.slice(0, 240),
     restaurantId: restaurant?._id || restaurantId,
     relatedEntity: {

@@ -143,6 +143,56 @@ const confirmBooking = async (req, res) => {
       });
     }
 
+    if (!booking.tableNumbers || booking.tableNumbers.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Vui lòng gán bàn trước khi xác nhận đặt bàn',
+      });
+    }
+
+    const capacityValidation = await bookingService.validateTableCapacity(
+      booking.tableNumbers,
+      booking.numberOfGuests,
+      booking.restaurantId
+    );
+    if (!capacityValidation.valid) {
+      return res.status(400).json({
+        success: false,
+        message: 'Bàn được gán không còn phù hợp với lượt đặt này',
+        errors: capacityValidation.errors,
+      });
+    }
+
+    for (const tableNumber of booking.tableNumbers) {
+      const { hasConflict } = await bookingService.checkTimeConflict(
+        booking.restaurantId,
+        tableNumber,
+        booking.bookingDate,
+        booking.bookingTime,
+        booking._id
+      );
+      if (hasConflict) {
+        return res.status(409).json({
+          success: false,
+          message: `Bàn ${tableNumber} đã được đặt trong khung giờ này. Vui lòng chọn bàn khác.`,
+        });
+      }
+    }
+
+    const reservation = await bookingService.replaceTableReservations(
+      booking.restaurantId,
+      booking.tableNumbers,
+      booking.bookingDate,
+      booking.bookingTime,
+      booking._id
+    );
+    if (!reservation.success) {
+      return res.status(409).json({
+        success: false,
+        message: reservation.message || 'Bàn vừa được khách khác đặt. Vui lòng chọn bàn khác.',
+      });
+    }
+
     booking.status = 'confirmed';
     booking.confirmedAt = new Date();
     booking.confirmedBy = req.user._id;
@@ -319,6 +369,16 @@ const completeBooking = async (req, res) => {
       });
     }
 
+    if (actualGuestCount !== undefined) {
+      const guestCount = Number(actualGuestCount);
+      if (!Number.isInteger(guestCount) || guestCount < 1 || guestCount > 100) {
+        return res.status(400).json({
+          success: false,
+          message: 'Số khách thực tế phải là số nguyên từ 1 đến 100',
+        });
+      }
+    }
+
     booking.status = 'completed';
     booking.completedAt = new Date();
     if (actualGuestCount !== undefined) {
@@ -332,6 +392,8 @@ const completeBooking = async (req, res) => {
     });
 
     await booking.save();
+
+    await bookingService.releaseTableReservations(booking._id);
 
     logActivity(booking.restaurantId, 'booking_completed', req.user._id, req.user.role,
       'Khách đã dùng bữa xong', { bookingId: booking._id, customerName: booking.customerName, actualGuestCount: booking.actualGuestCount });
@@ -495,7 +557,22 @@ const changeTable = async (req, res) => {
       }
     }
 
-    const oldTables = booking.tableNumbers.join(', ');
+    const oldTables = (booking.tableNumbers || []).join(', ');
+
+    const reservation = await bookingService.replaceTableReservations(
+      booking.restaurantId,
+      newTableNumbers,
+      booking.bookingDate,
+      booking.bookingTime,
+      booking._id
+    );
+    if (!reservation.success) {
+      return res.status(409).json({
+        success: false,
+        message: reservation.message || 'Bàn vừa được khách khác đặt. Vui lòng chọn bàn khác.',
+      });
+    }
+
     booking.tableNumbers = newTableNumbers;
 
     booking.statusHistory.push({
@@ -527,7 +604,10 @@ const getAvailableTables = async (req, res) => {
     const availableTables = await bookingService.getAvailableTables(
       booking.restaurantId,
       booking.bookingDate,
-      booking.bookingTime
+      booking.bookingTime,
+      undefined,
+      undefined,
+      booking._id
     );
 
     return res.json({
