@@ -233,7 +233,14 @@ const validateTableCapacity = async (tableNumbers, numberOfGuests, restaurantId)
 /**
  * Gets all active tables that are not occupied during the proposed time window.
  */
-const getAvailableTables = async (restaurantId, bookingDate, bookingTime, excludeUserId, excludeSessionId) => {
+const getAvailableTables = async (
+  restaurantId,
+  bookingDate,
+  bookingTime,
+  excludeUserId,
+  excludeSessionId,
+  excludeBookingId = null
+) => {
   // Find all active tables for the restaurant
   const allTables = await RestaurantTable.find({
     restaurantId,
@@ -294,7 +301,13 @@ const getAvailableTables = async (restaurantId, bookingDate, bookingTime, exclud
   for (const table of allTables) {
     if (heldSet.has(table.tableNumber)) continue;
     if (blockedSet.has(table.tableNumber)) continue;
-    const { hasConflict } = await checkTimeConflict(restaurantId, table.tableNumber, bookingDate, bookingTime);
+    const { hasConflict } = await checkTimeConflict(
+      restaurantId,
+      table.tableNumber,
+      bookingDate,
+      bookingTime,
+      excludeBookingId
+    );
     if (!hasConflict) {
       availableTables.push(table);
     }
@@ -429,6 +442,54 @@ const releaseTableReservations = async (bookingId) => {
   await TableReservation.deleteMany({ bookingId });
 };
 
+/**
+ * Keeps the atomic reservation records in sync when an owner assigns or changes tables.
+ * New tables are reserved before old tables are released so a failed swap never loses
+ * the booking's existing reservation.
+ */
+const replaceTableReservations = async (
+  restaurantId,
+  tableNumbers,
+  bookingDate,
+  bookingTime,
+  bookingId
+) => {
+  const desiredTableNumbers = [...new Set(tableNumbers)];
+  const currentReservations = await TableReservation.find({ bookingId }).select('tableNumber');
+  const currentTableNumbers = new Set(currentReservations.map((item) => item.tableNumber));
+  const addedTableNumbers = desiredTableNumbers.filter((tableNumber) => !currentTableNumbers.has(tableNumber));
+  const removedTableNumbers = [...currentTableNumbers].filter((tableNumber) => !desiredTableNumbers.includes(tableNumber));
+
+  if (addedTableNumbers.length > 0) {
+    const reservation = await reserveTables(
+      restaurantId,
+      addedTableNumbers,
+      bookingDate,
+      bookingTime,
+      bookingId
+    );
+
+    if (!reservation.success) {
+      // insertMany may have inserted an earlier item before a duplicate-key failure.
+      await TableReservation.deleteMany({ bookingId, tableNumber: { $in: addedTableNumbers } });
+      return reservation;
+    }
+  }
+
+  try {
+    if (removedTableNumbers.length > 0) {
+      await TableReservation.deleteMany({ bookingId, tableNumber: { $in: removedTableNumbers } });
+    }
+  } catch (error) {
+    if (addedTableNumbers.length > 0) {
+      await TableReservation.deleteMany({ bookingId, tableNumber: { $in: addedTableNumbers } });
+    }
+    throw error;
+  }
+
+  return { success: true };
+};
+
 // ─── Table Hold Functions ───
 
 const TableHold = require('../models/TableHold');
@@ -540,6 +601,7 @@ module.exports = {
   checkUserBookingBlock,
   reserveTables,
   releaseTableReservations,
+  replaceTableReservations,
   holdTables,
   releaseHolds,
   getHeldTableNumbers,

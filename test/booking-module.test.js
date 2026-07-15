@@ -8,6 +8,7 @@ dotenv.config();
 const User = require('../src/models/User');
 const Restaurant = require('../src/models/Restaurant');
 const RestaurantTable = require('../src/models/RestaurantTable');
+const TableReservation = require('../src/models/TableReservation');
 const Booking = require('../src/models/Booking');
 const emailService = require('../src/services/email.service');
 const bookingController = require('../src/controllers/booking.controller');
@@ -131,6 +132,8 @@ const createFixture = async (suffix, { createTables = true } = {}) => {
       city: 'City',
       fullAddress: '1 Test, City',
     },
+    coordinates: { latitude: 10.7769, longitude: 106.7009 },
+    location: { type: 'Point', coordinates: [106.7009, 10.7769] },
     operatingHours: makeOperatingHours(),
     approvalStatus: 'approved',
     active: true,
@@ -188,6 +191,7 @@ const bookingBody = ({ restaurant, tableNumbers = [], date = futureDateString(),
 const cleanup = async (suffix) => {
   const restaurants = await Restaurant.find({ name: new RegExp(`^${suffix}`) }).select('_id');
   const restaurantIds = restaurants.map((restaurant) => restaurant._id);
+  await TableReservation.deleteMany({ restaurantId: { $in: restaurantIds } });
   await Booking.deleteMany({ restaurantId: { $in: restaurantIds } });
   await RestaurantTable.deleteMany({ restaurantId: { $in: restaurantIds } });
   await Restaurant.deleteMany({ _id: { $in: restaurantIds } });
@@ -282,6 +286,18 @@ test('restaurant without tables still accepts customer booking without assigned 
     assert.equal(res.statusCode, 201);
     assert.deepEqual(res.body.data.tableNumbers, []);
     assert.equal(res.body.data.status, 'pending');
+
+    const booking = await Booking.findById(res.body.data.id);
+    const confirmRes = await callController(
+      ownerBookingController.confirmBooking,
+      createRequest({
+        user: fixture.owner,
+        booking,
+        restaurant: fixture.restaurant,
+      }),
+    );
+    assert.equal(confirmRes.statusCode, 400);
+    assert.match(confirmRes.body.message, /gán bàn/i);
   } finally {
     await cleanup(suffix);
   }
@@ -346,6 +362,9 @@ test('owner can confirm, complete, mark no-show, change table, and wrong owner i
     assert.equal(changeRes.statusCode, 200);
     assert.deepEqual(changeRes.body.data.tableNumbers, [fixture.tableB.tableNumber]);
 
+    const changedReservations = await TableReservation.find({ bookingId: booking._id });
+    assert.deepEqual(changedReservations.map((item) => item.tableNumber), [fixture.tableB.tableNumber]);
+
     const changed = await Booking.findById(booking._id);
     const completeRes = await callController(
       ownerBookingController.completeBooking,
@@ -358,6 +377,7 @@ test('owner can confirm, complete, mark no-show, change table, and wrong owner i
     );
     assert.equal(completeRes.statusCode, 200);
     assert.equal(completeRes.body.data.status, 'completed');
+    assert.equal(await TableReservation.countDocuments({ bookingId: booking._id }), 0);
 
     const noShowBooking = await Booking.create({
       customerId: fixture.customer._id,
