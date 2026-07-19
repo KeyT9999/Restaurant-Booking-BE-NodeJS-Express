@@ -39,6 +39,14 @@ const createWithdrawal = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Bạn không có quyền yêu cầu rút tiền cho nhà hàng này' });
     }
 
+    // Kiểm tra số dư nhà hàng có đủ để rút không
+    if ((restaurant.balance || 0) < amountNum) {
+      return res.status(400).json({
+        success: false,
+        message: `Số dư không đủ. Số dư hiện tại: ${(restaurant.balance || 0).toLocaleString('vi-VN')} VNĐ`,
+      });
+    }
+
     // Kiểm tra xem đã có yêu cầu pending nào chưa
     const existingPending = await WithdrawalRequest.findOne({
       restaurantId,

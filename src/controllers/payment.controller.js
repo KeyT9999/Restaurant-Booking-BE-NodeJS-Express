@@ -12,6 +12,10 @@ const featuredPlacementService = require('../services/featured-placement.service
 const voucherCampaignService = require('../services/voucher-campaign.service');
 const { expirePendingPayments } = require('../services/payment-lifecycle.service');
 const {
+  applyWalletToBookingPayment,
+  reverseWalletBookingPayment,
+} = require('../services/wallet-payment.service');
+const {
   payosConfig,
   SUBSCRIPTION_PLANS,
   PLAN_ORDER,
@@ -106,6 +110,9 @@ const findReusablePendingPayment = async ({ userId, targetType, targetId, metada
             await _processPaymentSuccess(candidate, null);
           }
           await candidate.save();
+          if (candidate.status !== 'paid') {
+            await reverseWalletBookingPayment(candidate._id, `Hoàn lại tiền ví do payment ${candidate.status}`);
+          }
           return findReusablePendingPayment({ userId, targetType, targetId, metadata });
         }
       } catch (err) {
@@ -118,6 +125,7 @@ const findReusablePendingPayment = async ({ userId, targetType, targetId, metada
           candidate.status = 'cancelled';
           candidate.cancelledAt = new Date();
           await candidate.save();
+          await reverseWalletBookingPayment(candidate._id, 'Hoàn lại tiền ví do link PayOS không tồn tại');
           return findReusablePendingPayment({ userId, targetType, targetId, metadata });
         }
       }
@@ -180,7 +188,7 @@ const createZeroDepositBookingSuccess = async (booking, res) => {
 
 exports.createPayment = async (req, res) => {
   try {
-    const { targetType, targetId } = req.body;
+    const { targetType, targetId, useWalletBalance = false } = req.body;
     const userId = req.user._id;
 
     if (!targetType || !targetId) {
@@ -308,12 +316,41 @@ exports.createPayment = async (req, res) => {
       voucherId: targetType === 'booking' ? (booking.voucherId?._id || booking.voucherId) : null,
       discountApplied: targetType === 'booking' ? (booking.discountAmount || 0) : 0,
       amountBeforeDiscount: targetType === 'booking' ? (booking.depositAmount || 0) : amount,
+      gatewayAmount: amount,
     });
+
+    let paymentSplit = { appliedAmount: 0, gatewayAmount: amount, walletBalance: null };
+    if (targetType === 'booking' && useWalletBalance === true) {
+      paymentSplit = await applyWalletToBookingPayment({
+        paymentId: payment._id,
+        userId,
+        bookingId: booking._id,
+      });
+      payment.walletAmountApplied = paymentSplit.appliedAmount;
+      payment.gatewayAmount = paymentSplit.gatewayAmount;
+
+      if (paymentSplit.gatewayAmount === 0) {
+        payment.status = 'paid';
+        payment.gateway = 'bookeat_wallet';
+        payment.paidAt = new Date();
+        await payment.save();
+        await _processPaymentSuccess(payment, req.app?.get?.('io') || null);
+        return res.status(201).json({
+          success: true,
+          message: 'Thanh toán tiền cọc thành công bằng Ví BookEat.',
+          data: {
+            ...payment.toObject(),
+            checkoutUrl: null,
+            walletBalance: paymentSplit.walletBalance,
+          },
+        });
+      }
+    }
 
     try {
       const payosResponse = await payosService.createPaymentLink(
         orderCode,
-        amount,
+        paymentSplit.gatewayAmount,
         description.substring(0, 25),
         undefined,
         undefined,
@@ -331,6 +368,7 @@ exports.createPayment = async (req, res) => {
       console.error('Create PayOS payment link error:', payosError.message);
       payment.status = 'failed';
       await payment.save();
+      await reverseWalletBookingPayment(payment._id, 'Hoàn lại tiền ví do không tạo được link PayOS');
       return res.status(500).json({
         success: false,
         message: 'Cannot create PayOS payment link. Please try again.',
@@ -489,6 +527,7 @@ exports.checkPaymentStatus = async (req, res) => {
           payment.expiredAt = payment.expiredAt || payment.cancelledAt;
         }
         await payment.save();
+        await reverseWalletBookingPayment(payment._id, `Hoàn lại tiền ví do payment ${payment.status}`);
         await featuredPlacementService.cancelFeaturedPlacementForPayment(payment, payment.cancelledAt);
         await voucherCampaignService.cancelVoucherCampaignForPayment(payment, payment.cancelledAt);
         responseData.status = payment.status;
@@ -530,6 +569,7 @@ exports.cancelPayment = async (req, res) => {
     payment.status = 'cancelled';
     payment.cancelledAt = new Date();
     await payment.save();
+    await reverseWalletBookingPayment(payment._id, 'Hoàn lại tiền ví do người dùng hủy payment');
     await featuredPlacementService.cancelFeaturedPlacementForPayment(payment, payment.cancelledAt);
     await voucherCampaignService.cancelVoucherCampaignForPayment(payment, payment.cancelledAt);
 

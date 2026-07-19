@@ -1,6 +1,7 @@
 const Payment = require('../models/Payment');
 const FeaturedPlacement = require('../models/FeaturedPlacement');
 const VoucherCampaignPurchase = require('../models/VoucherCampaignPurchase');
+const { reverseWalletBookingPayment } = require('./wallet-payment.service');
 
 const expirePendingPayments = async ({
   paymentId,
@@ -51,6 +52,10 @@ const expirePendingPayments = async ({
       { $set: { status: 'cancelled', cancelledAt: now } }
     ),
   ]);
+
+  await Promise.all(expiredPayments
+    .filter((payment) => payment.targetType === 'booking' && payment.walletAmountApplied > 0)
+    .map((payment) => reverseWalletBookingPayment(payment._id, 'Hoàn lại tiền ví do payment hết hạn')));
 
   return { count: expiredPayments.length, payments: expiredPayments };
 };

@@ -4,6 +4,7 @@ const Booking = require('../models/Booking');
 const bookingService = require('../services/booking.service');
 const notificationService = require('../services/notification.service');
 const bookingCommissionService = require('../services/booking-commission.service');
+const { cancelBookingToWallet } = require('../services/booking-cancellation.service');
 
 const sendNotification = (promise, label) => {
   Promise.resolve(promise).catch((error) => {
@@ -127,6 +128,49 @@ const updateBookingStatus = async (req, res) => {
       });
     }
 
+    if (status === 'cancelled') {
+      const result = await cancelBookingToWallet({
+        bookingId: booking._id,
+        customerId: booking.customerId,
+        actorId: req.user._id,
+        cancelledBy: 'admin',
+        waiveCancellationFee: true,
+        reason: note,
+      });
+
+      if (!result.alreadyProcessed) {
+        bookingService.releaseTableReservations(booking._id).catch(() => {});
+        if (booking.voucherId) {
+          const voucherService = require('../services/voucher.service');
+          voucherService.reverseRedemption(booking._id, note, req.user)
+            .catch((error) => console.warn(`[AdminCancel/voucher] ${error.message}`));
+        }
+        bookingCommissionService.markCancelledForBooking(booking._id, `Admin hủy booking: ${note}`)
+          .catch((error) => console.warn(`[BookingCommission/admin-cancelled] ${error.message}`));
+      }
+
+      const updatedBooking = await Booking.findById(booking._id)
+        .populate('customerId', 'fullName email phoneNumber avatarUrl')
+        .populate('restaurantId', 'name address phoneNumber logo')
+        .populate('confirmedBy', 'fullName email');
+      sendNotification(notificationService.notifyBookingStatusChanged(req.app?.get?.('io') || null, {
+        booking: result.booking,
+        restaurant: updatedBooking.restaurantId,
+        status: 'cancelled',
+        reason: `${note}. Hoàn 100% ${result.refundAmount.toLocaleString('vi-VN')}đ vào Ví BookEat; số dư ví: ${result.walletBalance.toLocaleString('vi-VN')}đ.`,
+        actorRole: 'admin',
+      }), 'cancelled');
+      return res.json({
+        success: true,
+        message: 'Admin đã hủy booking và hoàn 100% tiền cọc thực trả vào Ví BookEat.',
+        data: {
+          ...updatedBooking.toAdminJSON(),
+          walletBalance: result.walletBalance,
+          walletTransactionId: result.walletTransaction?._id || null,
+        },
+      });
+    }
+
     // Logic update status
     booking.status = status;
     booking.statusHistory.push({
@@ -140,6 +184,9 @@ const updateBookingStatus = async (req, res) => {
       booking.cancelledAt = new Date();
       booking.cancellationReason = note || 'Admin cancelled';
       
+      // Release table reservations
+      bookingService.releaseTableReservations(booking._id).catch(() => {});
+
       // Reverse voucher redemption if any
       if (booking.voucherId) {
         try {
@@ -148,6 +195,16 @@ const updateBookingStatus = async (req, res) => {
         } catch (reverseErr) {
           console.error('❌ Lỗi hoàn nguyên voucher khi admin hủy đặt bàn:', reverseErr.message);
         }
+      }
+
+      // Auto-refund if deposit was paid (admin cancels → 100% refund)
+      try {
+        const Restaurant = require('../models/Restaurant');
+        const refundService = require('../services/refund.service');
+        const restaurant = await Restaurant.findById(booking.restaurantId);
+        await refundService.autoRefund(booking, restaurant, req.user._id, 'admin');
+      } catch (refundErr) {
+        console.error('❌ Lỗi hoàn tiền khi admin hủy đặt bàn:', refundErr.message);
       }
     } else if (status === 'confirmed') {
       booking.confirmedBy = req.user._id;

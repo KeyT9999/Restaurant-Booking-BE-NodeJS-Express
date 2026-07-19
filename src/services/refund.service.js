@@ -8,14 +8,24 @@ const Payment = require('../models/Payment');
  * Calculate refund amount based on cancellation policy.
  * @param {Object} booking - The booking being cancelled
  * @param {Object} policy - Cancellation policy from restaurant
+ * @param {string} cancelledByRole - Who cancelled: 'customer', 'restaurant_owner', 'admin', 'system'
  * @returns {{ refundAmount: number, reason: string }}
  */
-const calculateRefund = (booking, policy) => {
+const calculateRefund = (booking, policy, cancelledByRole = 'customer') => {
   const depositAmount = booking.depositAmount || 0;
   if (depositAmount <= 0) {
     return { refundAmount: 0, reason: 'Không có tiền cọc để hoàn' };
   }
 
+  // If restaurant or admin cancels, always refund 100% — customer is not at fault
+  if (['restaurant_owner', 'restaurant', 'admin', 'system'].includes(cancelledByRole)) {
+    return {
+      refundAmount: depositAmount,
+      reason: `Hoàn 100% tiền cọc do ${cancelledByRole === 'admin' ? 'admin' : 'nhà hàng'} hủy đặt bàn`,
+    };
+  }
+
+  // Customer-initiated cancellation — apply time-based policy
   const now = new Date();
   const bookingDateTime = (() => {
     const d = new Date(booking.bookingDate);
@@ -68,20 +78,20 @@ const createRefund = async ({ booking, payment, amount, reason, requestedBy, req
  * @param {Object} booking - The cancelled booking
  * @param {Object} restaurant - The restaurant
  * @param {ObjectId} userId - User who performed the cancellation
- * @param {string} userRole - Role of the user
+ * @param {string} userRole - Role of the user ('customer', 'restaurant_owner', 'admin', 'system')
  * @returns {Promise<Object|null>} refund record or null
  */
 const autoRefund = async (booking, restaurant, userId, userRole) => {
   if (!booking.depositPaid || !booking.depositAmount) return null;
 
-  const policy = restaurant.cancellationPolicy || {
+  const policy = restaurant?.cancellationPolicy || {
     fullRefundBeforeHours: 24,
     partialRefundBeforeHours: 2,
     partialRefundPercent: 50,
     cancellationFee: 0,
   };
 
-  const { refundAmount, reason } = calculateRefund(booking, policy);
+  const { refundAmount, reason } = calculateRefund(booking, policy, userRole);
   if (refundAmount <= 0) return null;
 
   const payment = await Payment.findOne({

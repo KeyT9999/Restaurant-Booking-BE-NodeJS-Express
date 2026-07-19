@@ -8,6 +8,11 @@ const emailService = require('../services/email.service');
 const notificationService = require('../services/notification.service');
 const bookingCommissionService = require('../services/booking-commission.service');
 const {
+  BookingCancellationError,
+  getCancellationPreview: buildCancellationPreview,
+  cancelBookingToWallet,
+} = require('../services/booking-cancellation.service');
+const {
   BookingApplicationError,
   createBookingApplicationService,
 } = require('../services/application/booking-application.service');
@@ -173,6 +178,7 @@ const createBookingLegacy = async (req, res) => {
       depositAmount,
       discountAmount,
       voucherCode: voucherCode ? voucherCode.toUpperCase().trim() : null,
+      voucherId: voucherId || null,
       originalAmount: depositAmount,
       finalAmount: Math.max(0, depositAmount - discountAmount),
       preOrderItems: Array.isArray(preOrderItems) ? preOrderItems.map((item) => ({
@@ -495,6 +501,18 @@ const updateBooking = async (req, res) => {
     if (occasion !== undefined) booking.occasion = occasion;
     booking.tableNumbers = finalTables;
 
+    // Recalculate deposit if tables changed
+    if (isTablesChanged && finalTables.length > 0) {
+      const updatedTables = await RestaurantTable.find({
+        restaurantId: booking.restaurantId,
+        tableNumber: { $in: finalTables },
+      });
+      const newDeposit = updatedTables.reduce((sum, t) => sum + (t.depositAmount || 0), 0);
+      booking.depositAmount = newDeposit;
+      booking.originalAmount = newDeposit;
+      booking.finalAmount = Math.max(0, newDeposit - (booking.discountAmount || 0));
+    }
+
     // Ghi nhận lịch sử thay đổi
     booking.statusHistory.push({
       status: booking.status,
@@ -518,7 +536,7 @@ const updateBooking = async (req, res) => {
 /**
  * E. Hủy Đặt Bàn (DELETE /api/v1/bookings/:id/cancel)
  */
-const cancelBooking = async (req, res) => {
+const cancelBookingLegacy = async (req, res) => {
   try {
     const booking = req.booking; // Từ middleware verifyCustomerBookingAccess
     const customerId = req.user._id;
@@ -606,6 +624,117 @@ const cancelBooking = async (req, res) => {
 /**
  * F1. Hold Tables (POST /api/v1/bookings/hold-tables)
  */
+const getCancellationPreview = async (req, res) => {
+  try {
+    const data = await buildCancellationPreview({ booking: req.booking });
+    return res.json({ success: true, data });
+  } catch (error) {
+    if (error instanceof BookingCancellationError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+        details: error.details,
+      });
+    }
+    console.error('[CancellationPreview] Error:', error);
+    return res.status(500).json({ success: false, message: 'Không thể tính chính sách hủy lúc này' });
+  }
+};
+
+const cancelBooking = async (req, res) => {
+  try {
+    const customerId = req.user._id;
+    const result = await cancelBookingToWallet({
+      bookingId: req.booking._id,
+      customerId,
+      reason: req.body?.reason,
+    });
+    const booking = result.booking;
+
+    // External integrations run only after the database transaction commits.
+    if (!result.alreadyProcessed) {
+      bookingService.releaseTableReservations(booking._id).catch(() => {});
+
+      if (booking.voucherId) {
+        try {
+          const voucherService = require('../services/voucher.service');
+          await voucherService.reverseRedemption(booking._id, booking.cancellationReason, req.user);
+        } catch (reverseError) {
+          console.error('[CancelBooking] Voucher reversal error:', reverseError.message);
+        }
+      }
+
+      bookingCommissionService.markCancelledForBooking(
+        booking._id,
+        `Khách hàng hủy booking: ${booking.cancellationReason}`
+      ).catch((error) => console.warn(`[BookingCommission/customer-cancelled] ${error.message}`));
+    }
+
+    const restaurant = await Restaurant.findById(booking.restaurantId);
+    const io = req.app.get('io');
+    if (!result.alreadyProcessed) {
+      emitBookingEvent(io, `restaurant:${booking.restaurantId.toString()}`, 'booking:cancelled', {
+        bookingId: booking._id,
+        restaurantId: booking.restaurantId,
+        customerId,
+        cancelledBy: 'customer',
+        reason: booking.cancellationReason,
+        cancellationFeeAmount: result.cancellationFeeAmount,
+        refundAmount: result.refundAmount,
+        refundMethod: result.refundMethod,
+      });
+      sendNotification(
+        notificationService.notifyBookingStatusChanged(io, {
+          booking,
+          restaurant,
+          status: 'cancelled',
+          reason: `${booking.cancellationReason}. Phí hủy: ${result.cancellationFeeAmount.toLocaleString('vi-VN')}đ; hoàn Ví BookEat: ${result.refundAmount.toLocaleString('vi-VN')}đ; số dư ví: ${result.walletBalance.toLocaleString('vi-VN')}đ.`,
+          actorRole: 'customer',
+        }),
+        'cancelled'
+      );
+      sendBookingEmail(
+        emailService.sendBookingCancelledEmail(req.user, null, booking, booking.cancellationReason),
+        'cancelled'
+      );
+    }
+
+    return res.json({
+      success: true,
+      message: result.alreadyProcessed ? 'Booking đã được hủy trước đó' : 'Hủy đặt bàn thành công',
+      data: {
+        bookingId: booking._id,
+        bookingStatus: booking.status,
+        cancelledAt: booking.cancelledAt,
+        policyCode: result.policyCode,
+        depositPaid: result.depositPaid,
+        cancellationFeeRate: result.cancellationFeeRateBasisPoints / 10000,
+        cancellationFeeRateBasisPoints: result.cancellationFeeRateBasisPoints,
+        cancellationFeeAmount: result.cancellationFeeAmount,
+        refundAmount: result.refundAmount,
+        refundMethod: result.refundMethod,
+        refundStatus: result.refundStatus,
+        walletBalance: result.walletBalance,
+        walletTransactionId: result.walletTransaction?._id || null,
+        refundId: result.refund?._id || null,
+        alreadyProcessed: result.alreadyProcessed,
+      },
+    });
+  } catch (error) {
+    if (error instanceof BookingCancellationError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+        details: error.details,
+      });
+    }
+    console.error('[CancelBooking] Error:', error);
+    return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi hủy đặt bàn' });
+  }
+};
+
 const holdTables = async (req, res) => {
   try {
     const { restaurantId, bookingDate, bookingTime, tableNumbers } = req.body;
@@ -765,6 +894,19 @@ const rescheduleBooking = async (req, res) => {
     booking.bookingDate = normalizedDate;
     booking.bookingTime = newTime;
     booking.tableNumbers = targetTables;
+
+    // Recalculate deposit if tables changed
+    if (targetTables.length > 0) {
+      const newTables = await RestaurantTable.find({
+        restaurantId: booking.restaurantId,
+        tableNumber: { $in: targetTables },
+      });
+      const newDeposit = newTables.reduce((sum, t) => sum + (t.depositAmount || 0), 0);
+      booking.depositAmount = newDeposit;
+      booking.originalAmount = newDeposit;
+      booking.finalAmount = Math.max(0, newDeposit - (booking.discountAmount || 0));
+    }
+
     booking.rescheduleHistory.push({
       fromDate: oldDate,
       fromTime: oldTime,
@@ -865,6 +1007,7 @@ module.exports = {
   createBooking,
   getMyBookings,
   getBookingById,
+  getCancellationPreview,
   updateBooking,
   cancelBooking,
   checkAvailability,

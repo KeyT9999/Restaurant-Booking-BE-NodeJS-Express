@@ -51,9 +51,11 @@ exports.createRefundRequest = async (req, res) => {
     if (payment.targetType === 'booking') {
       const booking = await Booking.findById(payment.targetId);
       if (booking) {
-        const bookingTime = new Date(booking.bookingDate);
+        const d = new Date(booking.bookingDate);
+        const [bh, bm] = (booking.bookingTime || '00:00').split(':');
+        d.setHours(parseInt(bh, 10), parseInt(bm, 10), 0, 0);
         const now = new Date();
-        const hoursLeft = (bookingTime - now) / (1000 * 60 * 60);
+        const hoursLeft = (d - now) / (1000 * 60 * 60);
         if (hoursLeft < 24) {
           return res.status(400).json({
             success: false,

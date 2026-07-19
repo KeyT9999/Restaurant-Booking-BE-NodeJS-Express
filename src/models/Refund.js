@@ -20,7 +20,7 @@ const refundSchema = new mongoose.Schema(
     },
     requestedByRole: {
       type: String,
-      enum: ['customer', 'restaurant_owner'],
+      enum: ['customer', 'restaurant_owner', 'admin', 'system'],
       required: true,
     },
     approvedBy: {
@@ -47,6 +47,29 @@ const refundSchema = new mongoose.Schema(
     gatewayRefundId: {
       type: String,
       default: null,
+    },
+    refundMethod: {
+      type: String,
+      enum: ['manual', 'payos', 'bookeat_wallet'],
+      default: 'manual',
+      index: true,
+    },
+    walletTransactionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'WalletTransaction',
+      default: null,
+      unique: true,
+      sparse: true,
+    },
+    cancellationPolicyCode: {
+      type: String,
+      enum: ['FULL_REFUND', 'PARTIAL_REFUND', null],
+      default: null,
+    },
+    cancellationFeeAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
     },
     adminNote: {
       type: String,
