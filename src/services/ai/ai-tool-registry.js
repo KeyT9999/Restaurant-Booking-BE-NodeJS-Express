@@ -692,7 +692,7 @@ const phase5ToolMetadata = Object.freeze([
       bookingDate: {
         type: 'string',
         pattern: '^\\d{4}-\\d{2}-\\d{2}$',
-        description: 'Local booking date in Asia/Bangkok, YYYY-MM-DD. Ask if missing or ambiguous.',
+        description: 'Local booking date in Asia/Ho_Chi_Minh, YYYY-MM-DD. Ask if missing or ambiguous.',
       },
       bookingTime: {
         type: 'string',

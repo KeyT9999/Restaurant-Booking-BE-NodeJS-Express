@@ -210,8 +210,24 @@ test('Voucher redemption reversal logic', async () => {
     assert.equal(walletAfterRedeem.status, 'used');
     assert.equal(walletAfterRedeem.isUsed, true);
 
-    // 3. Perform reversal
-    const reversed = await voucherService.reverseRedemption(booking._id, 'Hủy đặt bàn');
+    // 3. Customer cannot restore after the configured window, but restaurant fault can.
+    await VoucherRedemption.updateOne(
+      { _id: redemption._id },
+      { $set: { usedAt: new Date(Date.now() - 31 * 60 * 1000) } },
+    );
+    const customerLateReversal = await voucherService.reverseRedemption(
+      booking._id,
+      'Khách hủy muộn',
+      { _id: customer._id, role: 'customer' },
+    );
+    assert.equal(customerLateReversal, null);
+    assert.equal((await Voucher.findById(voucher._id)).currentUsage, 1);
+
+    const reversed = await voucherService.reverseRedemption(
+      booking._id,
+      'Nhà hàng hủy đặt bàn',
+      { _id: restaurant.ownerId, role: 'restaurant_owner' },
+    );
     assert.ok(reversed);
     assert.equal(reversed.status, 'reversed');
 

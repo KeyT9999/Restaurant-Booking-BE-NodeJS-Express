@@ -2,6 +2,7 @@
 
 const mongoose = require('mongoose');
 const Booking = require('../models/Booking');
+const TableReservation = require('../models/TableReservation');
 const Payment = require('../models/Payment');
 const Refund = require('../models/Refund');
 const Wallet = require('../models/Wallet');
@@ -50,7 +51,7 @@ const buildStoredResult = async (booking, session = null) => {
     const query = Wallet.findById(walletTransaction.walletId);
     if (session) query.session(session);
     wallet = await query;
-  } else {
+  } else if (booking.customerId) {
     const query = Wallet.findOne({ userId: booking.customerId });
     if (session) query.session(session);
     wallet = await query;
@@ -190,7 +191,16 @@ const cancelBookingToWallet = async ({
       }
 
       const walletOwnerId = booking.customerId;
-      let wallet = await Wallet.findOne({ userId: walletOwnerId }).session(session);
+      if (policy.refundAmount > 0 && !walletOwnerId) {
+        throw new BookingCancellationError(
+          'GUEST_REFUND_REQUIRES_MANUAL_PROCESSING',
+          'Booking khách vãng lai có tiền cọc cần được hoàn theo nguồn thanh toán bởi owner/admin.',
+          409,
+        );
+      }
+      let wallet = walletOwnerId
+        ? await Wallet.findOne({ userId: walletOwnerId }).session(session)
+        : null;
       let walletTransaction = null;
       let refund = null;
 
@@ -301,6 +311,7 @@ const cancelBookingToWallet = async ({
         note: `${booking.cancellationReason}. Chính sách ${policy.policyCode}, phí ${policy.cancellationFeeAmount} VND, hoàn ví ${policy.refundAmount} VND.`,
       });
       await booking.save({ session });
+      await TableReservation.deleteMany({ bookingId: booking._id }).session(session);
 
       committedResult = {
         booking,

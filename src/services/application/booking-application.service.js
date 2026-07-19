@@ -8,6 +8,7 @@ const bookingService = require('../booking.service');
 const emailService = require('../email.service');
 const notificationService = require('../notification.service');
 const voucherService = require('../voucher.service');
+const { buildCanonicalPreOrder } = require('../preorder.service');
 
 const bookingCreateLocks = new Map();
 
@@ -265,25 +266,12 @@ const createBookingApplicationService = ({
       let preOrderItems = [];
       let foodTotalAmount = 0;
       if (Array.isArray(command.preOrderItems) && command.preOrderItems.length > 0) {
-        const MenuItem = mongoose.model('MenuItem');
-        const itemIds = command.preOrderItems.map(item => item.menuItemId);
-        const menuItems = await MenuItem.find({ _id: { $in: itemIds } });
-
-        preOrderItems = command.preOrderItems.map(item => {
-          const menuItem = menuItems.find(m => m._id.toString() === item.menuItemId.toString());
-          const price = menuItem ? menuItem.price : 0;
-          const name = menuItem ? menuItem.name : 'Món ăn';
-          const qty = Math.max(1, Number(item.quantity) || 1);
-          foodTotalAmount += price * qty;
-
-          return {
-            menuItemId: item.menuItemId,
-            nameSnapshot: name,
-            priceSnapshot: price,
-            quantity: qty,
-            note: item.note || null,
-          };
+        const canonicalPreOrder = await buildCanonicalPreOrder({
+          restaurantId: command.restaurantId,
+          items: command.preOrderItems,
         });
+        preOrderItems = canonicalPreOrder.items;
+        foodTotalAmount = canonicalPreOrder.totalAmount;
       }
 
       const depositAmount = tableDepositAmount + Math.round(0.1 * foodTotalAmount);
@@ -357,8 +345,39 @@ const createBookingApplicationService = ({
       });
 
       let savedBooking;
+      const persistBooking = async (session = null) => {
+        savedBooking = await bookingDocument.save(session ? { session } : undefined);
+        if (assignedTables.length > 0 && typeof booking.reserveTables === 'function') {
+          const reservation = await booking.reserveTables(
+            command.restaurantId,
+            assignedTables,
+            normalizedDate,
+            command.bookingTime,
+            savedBooking._id,
+            session ? { session } : undefined,
+          );
+          if (!reservation.success) {
+            throw new BookingApplicationError(
+              'TABLE_NO_LONGER_AVAILABLE',
+              reservation.message,
+              { statusCode: 409 },
+            );
+          }
+        }
+      };
+
+      // Plain test doubles do not expose a Mongoose connection. Real models always
+      // take the transaction path so booking + table slots commit or roll back together.
+      const supportsTransactions = Boolean(bookingModel?.db?.startSession);
+      const session = supportsTransactions ? await bookingModel.db.startSession() : null;
       try {
-        savedBooking = await bookingDocument.save();
+        if (session) {
+          await session.withTransaction(async () => {
+            await persistBooking(session);
+          });
+        } else {
+          await persistBooking();
+        }
       } catch (error) {
         if (sourceAiPendingActionId && error?.code === 11000) {
           const existingBooking = await bookingModel.findOne({ sourceAiPendingActionId });
@@ -376,6 +395,8 @@ const createBookingApplicationService = ({
           }
         }
         throw error;
+      } finally {
+        if (session) await session.endSession();
       }
 
       const io = context.io || null;

@@ -2,6 +2,7 @@
 
 const WithdrawalRequest = require('../models/WithdrawalRequest');
 const Restaurant = require('../models/Restaurant');
+const withdrawalService = require('../services/withdrawal.service');
 
 // Hỗ trợ gửi thông báo Socket.io realtime
 const emitNotification = (io, room, event, payload) => {
@@ -39,28 +40,8 @@ const createWithdrawal = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Bạn không có quyền yêu cầu rút tiền cho nhà hàng này' });
     }
 
-    // Kiểm tra số dư nhà hàng có đủ để rút không
-    if ((restaurant.balance || 0) < amountNum) {
-      return res.status(400).json({
-        success: false,
-        message: `Số dư không đủ. Số dư hiện tại: ${(restaurant.balance || 0).toLocaleString('vi-VN')} VNĐ`,
-      });
-    }
-
-    // Kiểm tra xem đã có yêu cầu pending nào chưa
-    const existingPending = await WithdrawalRequest.findOne({
-      restaurantId,
-      status: 'pending',
-    });
-    if (existingPending) {
-      return res.status(400).json({
-        success: false,
-        message: 'Bạn đã có một yêu cầu rút tiền đang chờ xử lý. Vui lòng đợi yêu cầu trước được hoàn tất.',
-      });
-    }
-
-    // Tạo withdrawal request
-    const withdrawal = new WithdrawalRequest({
+    const idempotencyKey = req.get?.('Idempotency-Key') || req.body?.idempotencyKey || null;
+    const result = await withdrawalService.createWithdrawal({
       ownerId: userId,
       restaurantId,
       amount: amountNum,
@@ -70,10 +51,9 @@ const createWithdrawal = async (req, res) => {
         accountHolder: accountHolder.trim(),
       },
       note: note ? note.trim() : null,
-      status: 'pending',
+      idempotencyKey,
     });
-
-    await withdrawal.save();
+    const withdrawal = result.withdrawal;
 
     // Gửi socket notify cho admin
     const io = req.app.get('io');
@@ -84,13 +64,16 @@ const createWithdrawal = async (req, res) => {
       message: `Yêu cầu rút tiền mới trị giá ${amountNum.toLocaleString('vi-VN')} VNĐ từ nhà hàng ${restaurant.name}`,
     });
 
-    return res.status(201).json({
+    return res.status(result.created ? 201 : 200).json({
       success: true,
-      message: 'Gửi yêu cầu rút tiền thành công',
+      message: result.created ? 'Gửi yêu cầu rút tiền thành công' : 'Yêu cầu rút tiền đã được ghi nhận trước đó',
       data: withdrawal,
     });
   } catch (error) {
     console.error('❌ [CreateWithdrawal] Lỗi:', error.message);
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message });
+    }
     return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi tạo yêu cầu rút tiền' });
   }
 };

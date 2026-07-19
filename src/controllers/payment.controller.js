@@ -160,10 +160,11 @@ const createZeroDepositBookingSuccess = async (booking, res) => {
   });
   await booking.save();
 
-  if (booking.voucherId) {
+  const resolvedVoucher = await voucherService.resolveBookingVoucher(booking);
+  if (resolvedVoucher) {
     try {
       await voucherService.redeemVoucher(
-        booking.voucherId.code,
+        resolvedVoucher.code,
         booking.restaurantId?._id || booking.restaurantId,
         booking.customerId,
         booking.depositAmount,
@@ -601,10 +602,11 @@ async function _processPaymentSuccess(payment, io = null) {
     });
     await booking.save();
 
-    if (booking.voucherId) {
+    const resolvedVoucher = await voucherService.resolveBookingVoucher(booking);
+    if (resolvedVoucher) {
       try {
         await voucherService.redeemVoucher(
-          booking.voucherId.code,
+          resolvedVoucher.code,
           booking.restaurantId,
           booking.customerId,
           booking.depositAmount,

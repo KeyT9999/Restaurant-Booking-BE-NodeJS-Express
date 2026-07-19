@@ -18,6 +18,8 @@ const {
 } = require('../services/application/booking-application.service');
 
 const bookingApplicationService = createBookingApplicationService();
+const { getBusinessDateKey, getBusinessTime } = require('../utils/booking-time');
+const { PreOrderValidationError, buildCanonicalPreOrder } = require('../services/preorder.service');
 
 const emitBookingEvent = (io, room, event, payload) => {
   if (!io) return;
@@ -301,14 +303,19 @@ const getMyBookings = async (req, res) => {
     const skip = (page - 1) * limit;
 
     const query = { customerId };
-    const today = bookingService.normalizeDate(new Date());
+    const today = bookingService.normalizeDate(getBusinessDateKey());
+    const currentBusinessTime = getBusinessTime();
 
     if (filterType === 'upcoming') {
-      query.bookingDate = { $gte: today };
+      query.$or = [
+        { bookingDate: { $gt: today } },
+        { bookingDate: today, bookingTime: { $gt: currentBusinessTime } },
+      ];
       query.status = { $in: ['pending', 'confirmed'] };
     } else if (filterType === 'past') {
       query.$or = [
         { bookingDate: { $lt: today } },
+        { bookingDate: today, bookingTime: { $lte: currentBusinessTime } },
         { status: { $in: ['completed', 'no_show'] } },
       ];
     } else if (filterType === 'cancelled') {
@@ -422,6 +429,21 @@ const updateBooking = async (req, res) => {
       occasion,
       tableNumbers,
     } = req.body;
+
+    const reservationFields = ['bookingDate', 'bookingTime', 'numberOfGuests', 'tableNumbers'];
+    const attemptedReservationChange = reservationFields.some((field) => (
+      Object.prototype.hasOwnProperty.call(req.body, field)
+    ));
+    if (attemptedReservationChange) {
+      return res.status(400).json({
+        success: false,
+        code: 'RESCHEDULE_REQUIRED',
+        message: 'Ngày, giờ, số khách và bàn phải được thay đổi qua chức năng đổi lịch.',
+      });
+    }
+    if (error instanceof PreOrderValidationError) {
+      return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message });
+    }
 
     const restaurant = await Restaurant.findById(booking.restaurantId);
     if (!restaurant) {
@@ -847,7 +869,7 @@ const rescheduleBooking = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Chỉ có thể đổi lịch khi đặt bàn đang chờ xác nhận hoặc đã xác nhận' });
     }
 
-    if (new Date(booking.bookingDate) <= new Date()) {
+    if (require('../utils/booking-time').isBookingStarted(booking)) {
       return res.status(400).json({ success: false, message: 'Không thể đổi lịch cho đặt bàn đã qua' });
     }
 
@@ -874,61 +896,39 @@ const rescheduleBooking = async (req, res) => {
       targetTables = availability.suggestedTables.map(t => t.tableNumber);
     }
 
-    // Release old reservations and create new ones
-    await bookingService.releaseTableReservations(booking._id);
-    const normalizedDate = bookingService.normalizeDate(newDate);
-
-    if (targetTables.length > 0) {
-      const reservation = await bookingService.reserveTables(
-        booking.restaurantId, targetTables, newDate, newTime, booking._id
-      );
-      if (!reservation.success) {
-        return res.status(409).json({ success: false, message: reservation.message, errorCode: reservation.error });
-      }
-    }
-
-    // Store old values for history
     const oldDate = booking.bookingDate;
     const oldTime = booking.bookingTime;
-
-    booking.bookingDate = normalizedDate;
-    booking.bookingTime = newTime;
-    booking.tableNumbers = targetTables;
-
-    // Recalculate deposit if tables changed
+    let newDeposit = booking.depositAmount;
     if (targetTables.length > 0) {
       const newTables = await RestaurantTable.find({
         restaurantId: booking.restaurantId,
         tableNumber: { $in: targetTables },
       });
-      const newDeposit = newTables.reduce((sum, t) => sum + (t.depositAmount || 0), 0);
-      booking.depositAmount = newDeposit;
-      booking.originalAmount = newDeposit;
-      booking.finalAmount = Math.max(0, newDeposit - (booking.discountAmount || 0));
+      newDeposit = newTables.reduce((sum, t) => sum + (t.depositAmount || 0), 0);
     }
-
-    booking.rescheduleHistory.push({
-      fromDate: oldDate,
-      fromTime: oldTime,
-      toDate: normalizedDate,
-      toTime: newTime,
-      rescheduledAt: new Date(),
-      rescheduledBy: req.user._id,
+    const updatedBooking = await bookingService.rescheduleBookingAtomic({
+      bookingId: booking._id,
+      bookingDate: newDate,
+      bookingTime: newTime,
+      tableNumbers: targetTables,
+      actorId: req.user._id,
+      depositAmount: newDeposit,
     });
-
-    await booking.save();
 
     // Notify restaurant
     const io = req.app.get('io');
     emitBookingEvent(io, `restaurant:${booking.restaurantId}`, 'booking:rescheduled', {
       bookingId: booking._id,
       restaurantId: booking.restaurantId,
-      oldDate, oldTime, newDate: normalizedDate, newTime,
+      oldDate, oldTime, newDate: updatedBooking.bookingDate, newTime,
     });
 
-    return res.json({ success: true, message: 'Đổi lịch đặt bàn thành công', data: booking.toPublicJSON() });
+    return res.json({ success: true, message: 'Đổi lịch đặt bàn thành công', data: updatedBooking.toPublicJSON() });
   } catch (error) {
     console.error('❌ [RescheduleBooking] Lỗi:', error.message);
+    if (['TABLE_ALREADY_RESERVED', 'BOOKING_NOT_RESCHEDULABLE'].includes(error.code)) {
+      return res.status(409).json({ success: false, message: error.message, errorCode: error.code });
+    }
     return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi đổi lịch đặt bàn' });
   }
 };
@@ -949,19 +949,20 @@ const updatePreOrder = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Danh sách món không hợp lệ' });
     }
 
-    booking.preOrderItems = items.map((item) => ({
-      menuItemId: item.menuItemId,
-      nameSnapshot: item.name,
-      priceSnapshot: item.price,
-      quantity: Math.max(1, item.quantity || 1),
-      note: item.note || null,
-    }));
+    const canonical = await buildCanonicalPreOrder({
+      restaurantId: booking.restaurantId,
+      items,
+    });
+    booking.preOrderItems = canonical.items;
 
     await booking.save();
 
     return res.json({ success: true, message: 'Cập nhật món đặt trước thành công', data: booking.toPublicJSON() });
   } catch (error) {
     console.error('❌ [UpdatePreOrder] Lỗi:', error.message);
+    if (error instanceof PreOrderValidationError) {
+      return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message });
+    }
     return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi cập nhật món đặt trước' });
   }
 };

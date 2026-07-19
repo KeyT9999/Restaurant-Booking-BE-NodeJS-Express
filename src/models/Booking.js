@@ -6,7 +6,7 @@ const bookingSchema = new mongoose.Schema(
     customerId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
-      required: [true, 'Customer ID là bắt buộc'],
+      default: null,
       index: true,
     },
     restaurantId: {
@@ -47,7 +47,8 @@ const bookingSchema = new mongoose.Schema(
     },
     customerEmail: {
       type: String,
-      required: [true, 'Email là bắt buộc'],
+      required: [function requireEmailForAccountBooking() { return Boolean(this.customerId); }, 'Email là bắt buộc'],
+      default: null,
       lowercase: true,
       trim: true,
     },
@@ -417,6 +418,7 @@ bookingSchema.methods.toAdminJSON = function () {
     confirmedAt: this.confirmedAt,
     confirmedBy: this.confirmedBy,
     completedAt: this.completedAt,
+    checkedInAt: this.checkedInAt,
     actualGuestCount: this.actualGuestCount,
     tableNumbers: this.tableNumbers,
     internalNotes: this.internalNotes,

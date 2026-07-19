@@ -1,6 +1,7 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const bookingConfig = require('../config/booking.config');
 const Voucher = require('../models/Voucher');
 const CustomerVoucher = require('../models/CustomerVoucher');
 const VoucherRedemption = require('../models/VoucherRedemption');
@@ -497,11 +498,9 @@ const reverseRedemption = async (bookingId, reason, actor = null) => {
 
     // Allow reversal for: admin, system, restaurant_owner (cancelling), or within 30 minutes for customer
     const isPrivileged = ['admin', 'system', 'restaurant_owner'].includes(actorRole);
-    if (timeDiffMinutes > 30 && !isPrivileged) {
-      // For customer-initiated reversal beyond 30 min, check if it's from a booking cancel
-      // We allow it because the booking cancel itself has its own time-based policy
-      // The voucher should always be reversed if the booking is cancelled
-      // (this function is only called during booking cancellation, so we allow it)
+    if (timeDiffMinutes > bookingConfig.customerVoucherReversalWindowMinutes && !isPrivileged) {
+      if (session) await session.commitTransaction();
+      return null;
     }
 
     // Set redemption status to reversed
@@ -557,6 +556,22 @@ const reverseRedemption = async (bookingId, reason, actor = null) => {
       session.endSession();
     }
   }
+};
+
+const resolveBookingVoucher = async (booking) => {
+  if (booking?.voucherId && typeof booking.voucherId === 'object' && booking.voucherId.code) return booking.voucherId;
+  if (booking?.voucherId) return Voucher.findById(booking.voucherId);
+  if (!booking?.voucherCode || !booking?.restaurantId) return null;
+  const restaurantId = booking.restaurantId?._id || booking.restaurantId;
+  const matches = await Voucher.find({
+    code: String(booking.voucherCode).trim().toUpperCase(),
+    $or: [{ restaurantId }, { applicableRestaurants: restaurantId }],
+  }).limit(2);
+  if (matches.length !== 1) {
+    console.warn(`[LegacyVoucher] booking=${booking._id} code=${booking.voucherCode} matches=${matches.length}; không tự chọn voucher.`);
+    return null;
+  }
+  return matches[0];
 };
 
 /**
@@ -711,6 +726,7 @@ module.exports = {
   unsaveVoucherForCustomer,
   redeemVoucher,
   reverseRedemption,
+  resolveBookingVoucher,
   getCustomerVouchers,
   getAvailableRestaurantVouchers,
   getVoucherStats,

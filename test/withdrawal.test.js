@@ -8,6 +8,8 @@ dotenv.config();
 const User = require('../src/models/User');
 const Restaurant = require('../src/models/Restaurant');
 const WithdrawalRequest = require('../src/models/WithdrawalRequest');
+const WithdrawalLedger = require('../src/models/WithdrawalLedger');
+const withdrawalService = require('../src/services/withdrawal.service');
 const ownerWithdrawalCtrl = require('../src/controllers/owner.withdrawal.controller');
 const adminWithdrawalCtrl = require('../src/controllers/admin.withdrawal.controller');
 
@@ -47,8 +49,11 @@ const callController = async (controller, req) => {
 };
 
 const cleanup = async (suffix) => {
-  await WithdrawalRequest.deleteMany({});
-  await Restaurant.deleteMany({ name: new RegExp(`^${suffix}`) });
+  const restaurants = await Restaurant.find({ name: new RegExp(`^${suffix}`) }).select('_id');
+  const restaurantIds = restaurants.map((restaurant) => restaurant._id);
+  await WithdrawalLedger.deleteMany({ restaurantId: { $in: restaurantIds } });
+  await WithdrawalRequest.deleteMany({ restaurantId: { $in: restaurantIds } });
+  await Restaurant.deleteMany({ _id: { $in: restaurantIds } });
   await User.deleteMany({ username: new RegExp(`^${suffix}`) });
 };
 
@@ -56,6 +61,84 @@ test.before(async () => {
   if (!process.env.MONGO_URI) throw new Error('MONGO_URI is required for withdrawal tests');
   if (mongoose.connection.readyState === 0) {
     await mongoose.connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 10000 });
+  }
+});
+
+test('concurrent withdrawals cannot overspend and terminal transition releases hold once', async () => {
+  const suffix = `WITHDRAW_RACE_${Date.now()}`;
+  await cleanup(suffix);
+  try {
+    const owner = await User.create({
+      username: `${suffix}_owner`, email: `${suffix}_owner@example.com`,
+      password: 'Password123!', fullName: 'Race Owner', role: 'restaurant_owner', emailVerified: true,
+    });
+    const admin = await User.create({
+      username: `${suffix}_admin`, email: `${suffix}_admin@example.com`,
+      password: 'Password123!', fullName: 'Race Admin', role: 'admin', emailVerified: true,
+    });
+    const restaurant = await Restaurant.create({
+      ownerId: owner._id,
+      name: `${suffix} Restaurant`,
+      description: 'Withdrawal concurrency fixture',
+      phoneNumber: '0901234567',
+      email: `${suffix}_restaurant@example.com`,
+      address: { street: '1 Test', ward: 'Ward', district: 'District', city: 'City' },
+      approvalStatus: 'approved', active: true,
+      balance: 200000, availableBalance: 200000,
+    });
+    const command = (key) => ({
+      ownerId: owner._id,
+      restaurantId: restaurant._id,
+      amount: 150000,
+      bankInfo: { bankName: 'VCB', accountNumber: '123456789', accountHolder: 'RACE OWNER' },
+      idempotencyKey: key,
+    });
+
+    const attempts = await Promise.allSettled([
+      withdrawalService.createWithdrawal(command(`${suffix}-a`)),
+      withdrawalService.createWithdrawal(command(`${suffix}-b`)),
+    ]);
+    const successes = attempts.filter((item) => item.status === 'fulfilled');
+    const failures = attempts.filter((item) => item.status === 'rejected');
+    assert.equal(successes.length, 1);
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].reason.code, 'INSUFFICIENT_AVAILABLE_BALANCE');
+
+    const withdrawal = successes[0].value.withdrawal;
+    const afterHold = await Restaurant.findById(restaurant._id);
+    assert.equal(afterHold.availableBalance, 50000);
+    assert.equal(afterHold.pendingWithdrawalBalance, 150000);
+
+    await withdrawalService.transition({
+      withdrawalId: withdrawal._id,
+      expectedStatuses: ['pending'],
+      nextStatus: 'approved',
+      actorId: admin._id,
+    });
+    const completions = await Promise.allSettled([
+      withdrawalService.transition({
+        withdrawalId: withdrawal._id, expectedStatuses: ['approved'],
+        nextStatus: 'completed', actorId: admin._id,
+      }),
+      withdrawalService.transition({
+        withdrawalId: withdrawal._id, expectedStatuses: ['approved'],
+        nextStatus: 'completed', actorId: admin._id,
+      }),
+    ]);
+    assert.equal(completions.filter((item) => item.status === 'fulfilled').length, 1);
+    assert.equal(completions.filter((item) => item.status === 'rejected').length, 1);
+
+    const afterComplete = await Restaurant.findById(restaurant._id);
+    assert.equal(afterComplete.availableBalance, 50000);
+    assert.equal(afterComplete.pendingWithdrawalBalance, 0);
+    assert.equal(await WithdrawalLedger.countDocuments({ withdrawalId: withdrawal._id, type: 'hold' }), 1);
+    assert.equal(await WithdrawalLedger.countDocuments({ withdrawalId: withdrawal._id, type: 'complete' }), 1);
+
+    const retry = await withdrawalService.createWithdrawal(command(withdrawal.idempotencyKey));
+    assert.equal(retry.created, false);
+    assert.equal(retry.withdrawal._id.toString(), withdrawal._id.toString());
+  } finally {
+    await cleanup(suffix);
   }
 });
 
@@ -107,6 +190,8 @@ test('Withdrawal module: Owner create, validate, duplicate check, Owner list, an
       address: { street: '1 Test St', ward: 'Ward', district: 'District', city: 'City', fullAddress: '1 Test St, City' },
       approvalStatus: 'approved',
       active: true,
+      balance: 500000,
+      availableBalance: 500000,
     });
 
     const restaurant2 = await Restaurant.create({
@@ -118,6 +203,8 @@ test('Withdrawal module: Owner create, validate, duplicate check, Owner list, an
       address: { street: '2 Test St', ward: 'Ward', district: 'District', city: 'City', fullAddress: '2 Test St, City' },
       approvalStatus: 'approved',
       active: true,
+      balance: 500000,
+      availableBalance: 500000,
     });
 
     // 2. Test create withdrawal: Validation checks (Amount < 10000)
@@ -161,6 +248,7 @@ test('Withdrawal module: Owner create, validate, duplicate check, Owner list, an
         bankName: 'Vietcombank',
         accountNumber: '123456789',
         accountHolder: 'OWNER MOT',
+        idempotencyKey: `${suffix}-withdrawal-1`,
         note: 'Rút tiền đợt 1',
       }
     });
@@ -172,9 +260,9 @@ test('Withdrawal module: Owner create, validate, duplicate check, Owner list, an
 
     // 5. Test create withdrawal: Duplicate pending check
     const duplicateRes = await callController(ownerWithdrawalCtrl.createWithdrawal, validReq);
-    assert.equal(duplicateRes.statusCode, 400);
-    assert.equal(duplicateRes.body.success, false);
-    assert.match(duplicateRes.body.message, /đang chờ xử lý/i);
+    assert.equal(duplicateRes.statusCode, 200);
+    assert.equal(duplicateRes.body.success, true);
+    assert.equal(duplicateRes.body.data._id.toString(), withdrawalId1.toString());
 
     // 6. Test Security Guard: Owner 2 cannot view Owner 1's request
     const unauthorizedViewReq = createRequest({

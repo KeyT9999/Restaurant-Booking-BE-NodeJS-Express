@@ -6,6 +6,7 @@ const Payment = require('../models/Payment');
 const Transaction = require('../models/Transaction');
 const Booking = require('../models/Booking');
 const notificationService = require('../services/notification.service');
+const { getBookingStartAt } = require('../utils/booking-time');
 
 const sendNotification = (promise, label) => {
   Promise.resolve(promise).catch((error) => {
@@ -51,11 +52,8 @@ exports.createRefundRequest = async (req, res) => {
     if (payment.targetType === 'booking') {
       const booking = await Booking.findById(payment.targetId);
       if (booking) {
-        const d = new Date(booking.bookingDate);
-        const [bh, bm] = (booking.bookingTime || '00:00').split(':');
-        d.setHours(parseInt(bh, 10), parseInt(bm, 10), 0, 0);
         const now = new Date();
-        const hoursLeft = (d - now) / (1000 * 60 * 60);
+        const hoursLeft = (getBookingStartAt(booking) - now) / (1000 * 60 * 60);
         if (hoursLeft < 24) {
           return res.status(400).json({
             success: false,

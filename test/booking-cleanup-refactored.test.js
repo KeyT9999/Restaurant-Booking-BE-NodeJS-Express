@@ -106,6 +106,7 @@ test('processExpiredBooking - checkedInAt == null leads to no_show and increment
   const originalBookingSave = Booking.prototype.save;
   const originalUserFindById = User.findById;
   const originalUserSave = User.prototype.save;
+  const originalRestaurantFindById = Restaurant.findById;
   const originalRelease = bookingService.releaseTableReservations;
 
   const bookingId = new mongoose.Types.ObjectId();
@@ -144,6 +145,7 @@ test('processExpiredBooking - checkedInAt == null leads to no_show and increment
       return mockBooking;
     };
     User.findById = async () => mockUser;
+    Restaurant.findById = async () => null;
     User.prototype.save = async function () {
       userSaveCalled = true;
       return this;
@@ -166,6 +168,7 @@ test('processExpiredBooking - checkedInAt == null leads to no_show and increment
     Booking.prototype.save = originalBookingSave;
     User.findById = originalUserFindById;
     User.prototype.save = originalUserSave;
+    Restaurant.findById = originalRestaurantFindById;
     bookingService.releaseTableReservations = originalRelease;
   }
 });

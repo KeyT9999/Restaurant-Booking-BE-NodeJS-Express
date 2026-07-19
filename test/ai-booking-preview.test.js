@@ -152,7 +152,7 @@ test('prepare_booking asks for missing profile contact instead of inventing it',
   );
 });
 
-test('prepare_booking validates the booking window in Asia/Bangkok time', async () => {
+test('prepare_booking validates the booking window in Asia/Ho_Chi_Minh time', async () => {
   const { workflow } = createWorkflow({
     now: () => new Date('2026-06-18T13:00:00.000Z'),
   });

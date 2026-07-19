@@ -3,6 +3,7 @@
 const menuService = require('../services/menu.service');
 const { assertOwnerCanAccessRestaurant } = require('../utils/restaurant-permission');
 const MenuItem = require('../models/MenuItem');
+const MenuCategory = require('../models/MenuCategory');
 
 // ═══════════════════════════════════════════════
 // MENU CATEGORIES
@@ -67,10 +68,18 @@ exports.createCategory = async (req, res) => {
 // PUT /api/v1/owner/menu-categories/:id
 exports.updateCategory = async (req, res) => {
   try {
-    const category = await menuService.updateCategory(req.params.id, req.body);
-
-    // Verify ownership
-    await assertOwnerCanAccessRestaurant(req.user._id, category.restaurantId);
+    const existingCategory = await MenuCategory.findById(req.params.id).select('restaurantId');
+    if (!existingCategory) {
+      return res.status(404).json({ success: false, message: 'Danh mục không tồn tại' });
+    }
+    await assertOwnerCanAccessRestaurant(req.user._id, existingCategory.restaurantId);
+    const { name, description, displayOrder, isActive } = req.body || {};
+    const category = await menuService.updateCategory(req.params.id, {
+      ...(name !== undefined ? { name } : {}),
+      ...(description !== undefined ? { description } : {}),
+      ...(displayOrder !== undefined ? { displayOrder } : {}),
+      ...(isActive !== undefined ? { isActive } : {}),
+    });
 
     return res.status(200).json({
       success: true,

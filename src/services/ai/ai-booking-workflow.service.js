@@ -9,8 +9,9 @@ const restaurantQueryService = require('../restaurant-query.service');
 const voucherService = require('../voucher.service');
 const { createAiPendingActionService } = require('./ai-pending-action.service');
 const { isValidDateString, isValidTimeString } = require('./tools/customer-dynamic.tools');
+const bookingTimeUtils = require('../../utils/booking-time');
 
-const BOOKING_TIMEZONE = 'Asia/Bangkok';
+const BOOKING_TIMEZONE = bookingTimeUtils.BUSINESS_TIME_ZONE;
 const VALID_OCCASIONS = new Set(['birthday', 'anniversary', 'business', 'date', 'family', 'other']);
 const PHONE_PATTERN = /^(0[35789][0-9]{8}|02[0-9]{9})$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -88,7 +89,7 @@ const makeBookingPreview = ({
   bookingDate,
   bookingTime,
   timezone: BOOKING_TIMEZONE,
-  localDateTime: `${bookingDate}T${bookingTime}:00+07:00`,
+  localDateTime: bookingTimeUtilsLabel(bookingDate, bookingTime),
   numberOfGuests,
   tableNumbers,
   tableAssignment: tableNumbers.length > 0 ? 'suggested' : 'restaurant_managed',
@@ -109,13 +110,22 @@ const makeBookingPreview = ({
   disclaimer: 'Đây là bản xem trước, chưa phải booking thật. Bàn và voucher chưa được giữ.',
 });
 
+const bookingTimeUtilsLabel = (bookingDate, time) => (
+  bookingTimeUtils.toBusinessIsoString(bookingTimeUtils.getBookingStartAt(bookingDate, time))
+);
+
 const validateBangkokBookingWindow = ({
   bookingDate,
   bookingTime,
   currentTime,
   constants = bookingService.BOOKING_CONSTANTS,
 }) => {
-  const localDateTime = new Date(`${bookingDate}T${bookingTime}:00+07:00`);
+  let localDateTime;
+  try {
+    localDateTime = bookingTimeUtils.getBookingStartAt(bookingDate, bookingTime);
+  } catch {
+    localDateTime = new Date(Number.NaN);
+  }
   if (Number.isNaN(localDateTime.getTime())) {
     throw new AiBookingWorkflowError('INVALID_BOOKING_TIME', 'Thời gian đặt bàn không hợp lệ.');
   }
