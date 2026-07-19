@@ -4,6 +4,7 @@ const Booking = require('../models/Booking');
 const bookingService = require('../services/booking.service');
 const notificationService = require('../services/notification.service');
 const bookingCommissionService = require('../services/booking-commission.service');
+const RestaurantActivityLog = require('../models/RestaurantActivityLog');
 const { cancelBookingToWallet } = require('../services/booking-cancellation.service');
 
 const sendNotification = (promise, label) => {
@@ -169,6 +170,47 @@ const updateBookingStatus = async (req, res) => {
           walletTransactionId: result.walletTransaction?._id || null,
         },
       });
+    }
+
+    if (status === 'completed' || status === 'no_show') {
+      const result = await bookingService.processExpiredBooking(
+        booking._id,
+        new Date(),
+        req.app?.get?.('io') || null,
+        {
+          expectedStatus: status,
+          actorId: req.user._id,
+          actorRole: req.user.role,
+          source: `admin_booking_${status}`,
+          reason: note || `Admin updated status to ${status}`,
+          bypassExpiry: status === 'completed',
+        },
+      );
+      if (!result.success) {
+        return res.status(409).json({ success: false, message: result.reason });
+      }
+      await RestaurantActivityLog.create({
+        restaurantId: booking.restaurantId,
+        action: status === 'completed' ? 'booking_completed' : 'booking_no_show',
+        performedBy: req.user._id,
+        performedByRole: req.user.role,
+        reason: note || `Admin updated status to ${status}`,
+        metadata: {
+          bookingId: booking._id,
+          oldStatus: 'confirmed',
+          newStatus: status,
+          actorId: req.user._id,
+          actorRole: req.user.role,
+          restaurantId: booking.restaurantId,
+          source: 'admin_api',
+          timestamp: new Date(),
+        },
+      });
+      const updatedBooking = await Booking.findById(booking._id)
+        .populate('customerId', 'fullName email phoneNumber avatarUrl')
+        .populate('restaurantId', 'name address phoneNumber logo')
+        .populate('confirmedBy', 'fullName email');
+      return res.json({ success: true, message: `Đã cập nhật booking sang ${status}`, data: updatedBooking.toAdminJSON() });
     }
 
     // Logic update status

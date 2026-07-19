@@ -1,5 +1,6 @@
 'use strict';
 
+const mongoose = require('mongoose');
 const Booking = require('../models/Booking');
 const User = require('../models/User');
 const Restaurant = require('../models/Restaurant');
@@ -10,6 +11,7 @@ const bookingService = require('../services/booking.service');
 const emailService = require('../services/email.service');
 const notificationService = require('../services/notification.service');
 const bookingCommissionService = require('../services/booking-commission.service');
+const { getBusinessDateKey, normalizeBusinessDate } = require('../utils/booking-time');
 const {
   BookingCancellationError,
   cancelBookingToWallet,
@@ -18,6 +20,10 @@ const {
 const emitBookingEvent = (io, room, event, payload) => {
   if (!io) return;
   io.to(room).emit(event, payload);
+};
+const emitCustomerBookingEvent = (io, customerId, event, payload) => {
+  if (!customerId) return;
+  emitBookingEvent(io, `user:${customerId.toString()}`, event, payload);
 };
 
 const sendBookingEmail = (promise, label) => {
@@ -183,38 +189,21 @@ const confirmBooking = async (req, res) => {
       }
     }
 
-    const reservation = await bookingService.replaceTableReservations(
-      booking.restaurantId,
-      booking.tableNumbers,
-      booking.bookingDate,
-      booking.bookingTime,
-      booking._id
-    );
-    if (!reservation.success) {
-      return res.status(409).json({
-        success: false,
-        message: reservation.message || 'Bàn vừa được khách khác đặt. Vui lòng chọn bàn khác.',
-      });
-    }
-
-    booking.status = 'confirmed';
-    booking.confirmedAt = new Date();
-    booking.confirmedBy = req.user._id;
-
-    booking.statusHistory.push({
-      status: 'confirmed',
-      changedBy: req.user._id,
-      note: 'Nhà hàng xác nhận đặt bàn',
+    const confirmedBooking = await bookingService.confirmBookingAtomic({
+      bookingId: booking._id,
+      actorId: req.user._id,
     });
-
-    await booking.save();
+    booking.status = confirmedBooking.status;
+    booking.confirmedAt = confirmedBooking.confirmedAt;
+    booking.confirmedBy = confirmedBooking.confirmedBy;
+    booking.statusHistory = confirmedBooking.statusHistory;
 
     logActivity(booking.restaurantId, 'booking_confirmed', req.user._id, req.user.role,
       'Nhà hàng xác nhận đặt bàn', { bookingId: booking._id, customerName: booking.customerName });
 
     // Gửi thông báo real-time qua Socket.io
     const io = req.app.get('io');
-    emitBookingEvent(io, `user:${booking.customerId.toString()}`, 'booking:confirmed', {
+    emitCustomerBookingEvent(io, booking.customerId, 'booking:confirmed', {
       bookingId: booking._id,
       restaurantId: booking.restaurantId,
       status: booking.status,
@@ -234,7 +223,7 @@ const confirmBooking = async (req, res) => {
       'confirmed'
     );
     const legacyRawRoomNotificationsEnabled = process.env.BOOKING_LEGACY_RAW_SOCKET_ROOMS === 'true';
-    if (legacyRawRoomNotificationsEnabled && io) {
+    if (legacyRawRoomNotificationsEnabled && io && booking.customerId) {
       io.to(booking.customerId.toString()).emit('booking:confirmed', {
         bookingId: booking._id,
         restaurantId: booking.restaurantId,
@@ -249,6 +238,9 @@ const confirmBooking = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ [ConfirmBooking] Lỗi:', error.message);
+    if (['TABLE_ALREADY_RESERVED', 'BOOKING_NOT_CONFIRMABLE'].includes(error.code)) {
+      return res.status(409).json({ success: false, code: error.code, message: error.message });
+    }
     return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi xác nhận đặt bàn' });
   }
 };
@@ -316,7 +308,7 @@ const cancelBookingLegacy = async (req, res) => {
     ).catch((error) => {
       console.warn(`[BookingCommission/cancelled] ${error.message}`);
     });
-    emitBookingEvent(io, `user:${booking.customerId.toString()}`, 'booking:cancelled', {
+    emitCustomerBookingEvent(io, booking.customerId, 'booking:cancelled', {
       bookingId: booking._id,
       restaurantId: booking.restaurantId,
       status: booking.status,
@@ -338,7 +330,7 @@ const cancelBookingLegacy = async (req, res) => {
       'cancelled'
     );
     const legacyRawRoomNotificationsEnabled = process.env.BOOKING_LEGACY_RAW_SOCKET_ROOMS === 'true';
-    if (legacyRawRoomNotificationsEnabled && io) {
+    if (legacyRawRoomNotificationsEnabled && io && booking.customerId) {
       io.to(booking.customerId.toString()).emit('booking:cancelled', {
         bookingId: booking._id,
         restaurantId: booking.restaurantId,
@@ -393,7 +385,7 @@ const cancelBooking = async (req, res) => {
         .catch((error) => console.warn(`[BookingCommission/cancelled] ${error.message}`));
 
       const io = req.app.get('io');
-      emitBookingEvent(io, `user:${booking.customerId.toString()}`, 'booking:cancelled', {
+      emitCustomerBookingEvent(io, booking.customerId, 'booking:cancelled', {
         bookingId: booking._id,
         restaurantId: booking.restaurantId,
         status: booking.status,
@@ -444,70 +436,109 @@ const completeBooking = async (req, res) => {
       });
     }
 
-    if (actualGuestCount !== undefined) {
-      const guestCount = Number(actualGuestCount);
-      if (!Number.isInteger(guestCount) || guestCount < 1 || guestCount > 100) {
-        return res.status(400).json({
-          success: false,
-          message: 'Số khách thực tế phải là số nguyên từ 1 đến 100',
-        });
-      }
+    if (!booking.checkedInAt) {
+      return res.status(400).json({ success: false, message: 'Khách phải check-in trước khi hoàn thành booking' });
     }
 
-    booking.status = 'completed';
-    booking.completedAt = new Date();
-    if (actualGuestCount !== undefined) {
-      booking.actualGuestCount = Number(actualGuestCount);
+    const guestCount = actualGuestCount === undefined ? undefined : Number(actualGuestCount);
+    if (guestCount !== undefined && (!Number.isInteger(guestCount) || guestCount < 1 || guestCount > 100)) {
+      return res.status(400).json({ success: false, message: 'Số khách thực tế phải là số nguyên từ 1 đến 100' });
     }
 
-    booking.statusHistory.push({
-      status: 'completed',
-      changedBy: req.user._id,
-      note: 'Khách đã dùng bữa xong và hoàn tất đặt bàn',
-    });
-
-    await booking.save();
-
-    await bookingService.releaseTableReservations(booking._id);
-
-    logActivity(booking.restaurantId, 'booking_completed', req.user._id, req.user.role,
-      'Khách đã dùng bữa xong', { bookingId: booking._id, customerName: booking.customerName, actualGuestCount: booking.actualGuestCount });
-
-    // Cập nhật statistics cho nhà hàng
-    const restaurant = req.restaurant;
-    await bookingCommissionService.createLedgerForBooking(booking._id, {
-      booking,
-      restaurant,
-      source: booking.sourceAiPendingActionId ? 'ai_booking_completed' : 'owner_booking_completed',
-    });
-    restaurant.stats.completedBookings += 1;
-    await restaurant.save();
-
-    const io = req.app.get('io');
-    emitBookingEvent(io, `user:${booking.customerId.toString()}`, 'booking:completed', {
-      bookingId: booking._id,
-      restaurantId: booking.restaurantId,
-      status: booking.status,
-      message: 'Dat ban da hoan thanh',
-    });
-    sendNotification(
-      notificationService.notifyBookingStatusChanged(io, {
-        booking,
-        restaurant,
-        status: 'completed',
-        actorRole: 'restaurant_owner',
-      }),
-      'completed'
+    const result = await bookingService.processExpiredBooking(
+      booking._id,
+      new Date(),
+      req.app.get('io'),
+      {
+        expectedStatus: 'completed',
+        actorId: req.user._id,
+        actorRole: req.user.role,
+        source: booking.sourceAiPendingActionId ? 'ai_booking_completed' : 'owner_booking_completed',
+        reason: 'Owner hoàn thành booking thủ công; khách đã check-in',
+        actualGuestCount: guestCount,
+        bypassExpiry: true,
+      },
     );
+    if (!result.success) {
+      return res.status(409).json({ success: false, message: result.reason });
+    }
+
+    const updatedBooking = await Booking.findById(booking._id);
+    logActivity(booking.restaurantId, 'booking_completed', req.user._id, req.user.role,
+      'Khách đã dùng bữa xong', {
+        bookingId: booking._id, oldStatus: 'confirmed', newStatus: 'completed',
+        actorId: req.user._id, actorRole: req.user.role, restaurantId: booking.restaurantId,
+        source: 'owner_api', timestamp: new Date(), actualGuestCount: guestCount,
+      });
 
     return res.json({
       success: true,
       message: 'Hoàn thành đặt bàn thành công',
-      data: booking.toAdminJSON(),
+      data: updatedBooking.toAdminJSON(),
     });
   } catch (error) {
     console.error('❌ [CompleteBooking] Lỗi:', error.message);
     return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi hoàn thành đặt bàn' });
+  }
+};
+
+/**
+ * E.5 Check-in Đặt Bàn (PUT /api/v1/owner/bookings/:id/checkin)
+ */
+const checkInBooking = async (req, res) => {
+  try {
+    const booking = req.booking;
+
+    if (booking.status !== 'confirmed') {
+      return res.status(400).json({
+        success: false,
+        message: 'Chỉ có thể check-in khi đặt bàn đã được xác nhận',
+      });
+    }
+
+    if (booking.checkedInAt) {
+      return res.status(400).json({
+        success: false,
+        message: 'Đặt bàn này đã được check-in trước đó',
+      });
+    }
+
+    booking.checkedInAt = new Date();
+    booking.statusHistory.push({
+      status: booking.status,
+      changedBy: req.user._id,
+      note: 'Chủ nhà hàng xác nhận check-in tại quầy',
+    });
+
+    await booking.save();
+
+    logActivity(booking.restaurantId, 'booking_checked_in', req.user._id, req.user.role,
+      'Nhân viên xác nhận check-in tại quầy', {
+        bookingId: booking._id,
+        actorId: req.user._id,
+        actorRole: req.user.role,
+        restaurantId: booking.restaurantId,
+        timestamp: new Date(),
+      });
+
+    const io = req.app.get('io');
+    emitBookingEvent(io, `restaurant:${booking.restaurantId}`, 'booking:checked-in', {
+      bookingId: booking._id,
+      restaurantId: booking.restaurantId,
+    });
+    emitCustomerBookingEvent(io, booking.customerId, 'booking:checked-in', {
+      bookingId: booking._id,
+      restaurantId: booking.restaurantId,
+    });
+
+    return res.json({
+      success: true,
+      message: 'Check-in thành công',
+      data: booking.toAdminJSON(),
+    });
+  } catch (error) {
+    console.error('❌ [CheckInBooking] Lỗi:', error.message);
+    return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi thực hiện check-in' });
   }
 };
 
@@ -525,53 +556,38 @@ const markNoShow = async (req, res) => {
       });
     }
 
-    booking.status = 'no_show';
-    
-    booking.statusHistory.push({
-      status: 'no_show',
-      changedBy: req.user._id,
-      note: 'Khách hàng không đến theo giờ đặt',
-    });
-
-    await booking.save();
-
-    logActivity(booking.restaurantId, 'booking_no_show', req.user._id, req.user.role,
-      'Khách hàng không đến', { bookingId: booking._id, customerName: booking.customerName });
-
-    // Release table reservations
-    bookingService.releaseTableReservations(booking._id).catch(() => {});
-
-    // Increment no-show counter and apply block if needed
-    const customer = await User.findById(booking.customerId);
-    if (customer) {
-      customer.noShowCounter = (customer.noShowCounter || 0) + 1;
-      if (customer.noShowCounter >= 3) {
-        customer.bookingBlockedUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-      }
-      await customer.save();
+    if (booking.checkedInAt) {
+      return res.status(400).json({ success: false, message: 'Booking đã check-in nên không thể đánh dấu no-show' });
     }
 
-    const io = req.app.get('io');
-    emitBookingEvent(io, `user:${booking.customerId.toString()}`, 'booking:no_show', {
-      bookingId: booking._id,
-      restaurantId: booking.restaurantId,
-      status: booking.status,
-      message: 'Dat ban duoc danh dau no-show',
-    });
-    sendNotification(
-      notificationService.notifyBookingStatusChanged(io, {
-        booking,
-        restaurant: req.restaurant,
-        status: 'no_show',
-        actorRole: 'restaurant_owner',
-      }),
-      'no_show'
+    const result = await bookingService.processExpiredBooking(
+      booking._id,
+      new Date(),
+      req.app.get('io'),
+      {
+        expectedStatus: 'no_show',
+        actorId: req.user._id,
+        actorRole: req.user.role,
+        source: 'owner_booking_no_show',
+        reason: 'Owner đánh dấu no-show sau lifecycle deadline; khách chưa check-in',
+      },
     );
+    if (!result.success) {
+      return res.status(409).json({ success: false, message: result.reason });
+    }
+
+    const updatedBooking = await Booking.findById(booking._id);
+    logActivity(booking.restaurantId, 'booking_no_show', req.user._id, req.user.role,
+      'Khách hàng không đến', {
+        bookingId: booking._id, oldStatus: 'confirmed', newStatus: 'no_show',
+        actorId: req.user._id, actorRole: req.user.role, restaurantId: booking.restaurantId,
+        source: 'owner_api', timestamp: new Date(),
+      });
 
     return res.json({
       success: true,
       message: 'Đã đánh dấu khách hàng không đến (no-show)',
-      data: booking.toAdminJSON(),
+      data: updatedBooking.toAdminJSON(),
     });
   } catch (error) {
     console.error('❌ [MarkNoShow] Lỗi:', error.message);
@@ -632,39 +648,22 @@ const changeTable = async (req, res) => {
       }
     }
 
-    const oldTables = (booking.tableNumbers || []).join(', ');
-
-    const reservation = await bookingService.replaceTableReservations(
-      booking.restaurantId,
-      newTableNumbers,
-      booking.bookingDate,
-      booking.bookingTime,
-      booking._id
-    );
-    if (!reservation.success) {
-      return res.status(409).json({
-        success: false,
-        message: reservation.message || 'Bàn vừa được khách khác đặt. Vui lòng chọn bàn khác.',
-      });
-    }
-
-    booking.tableNumbers = newTableNumbers;
-
-    booking.statusHistory.push({
-      status: booking.status,
-      changedBy: req.user._id,
-      note: `Thay đổi bàn ăn từ [${oldTables}] sang [${newTableNumbers.join(', ')}]`,
+    const updatedBooking = await bookingService.changeBookingTablesAtomic({
+      bookingId: booking._id,
+      tableNumbers: newTableNumbers,
+      actorId: req.user._id,
     });
-
-    await booking.save();
 
     return res.json({
       success: true,
       message: 'Thay đổi bàn ăn cho đặt bàn thành công',
-      data: booking.toAdminJSON(),
+      data: updatedBooking.toAdminJSON(),
     });
   } catch (error) {
     console.error('❌ [ChangeTable] Lỗi:', error.message);
+    if (['TABLE_ALREADY_RESERVED', 'BOOKING_NOT_RESCHEDULABLE'].includes(error.code)) {
+      return res.status(409).json({ success: false, code: error.code, message: error.message });
+    }
     return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi đổi bàn ăn' });
   }
 };
@@ -770,8 +769,7 @@ const getBookingStats = async (req, res) => {
     }
 
     const filter = { restaurantId };
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
+    const today = normalizeBusinessDate(getBusinessDateKey());
 
     if (period === 'today') {
       filter.bookingDate = today;
@@ -894,8 +892,7 @@ const getRevenueStats = async (req, res) => {
     }
 
     const filter = { restaurantId };
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
+    const today = normalizeBusinessDate(getBusinessDateKey());
 
     if (period === 'today') {
       filter.bookingDate = today;
@@ -998,14 +995,11 @@ const bulkCancelBooking = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Thiếu ngày cần hủy' });
     }
 
-    const cancelDate = new Date(date);
-    cancelDate.setUTCHours(0, 0, 0, 0);
-    const endDate = new Date(cancelDate);
-    endDate.setUTCHours(23, 59, 59, 999);
+    const cancelDate = normalizeBusinessDate(date);
 
     const filter = {
       restaurantId,
-      bookingDate: { $gte: cancelDate, $lte: endDate },
+      bookingDate: cancelDate,
       status: { $in: ['pending', 'confirmed'] },
     };
     if (statusFilter) {
@@ -1146,15 +1140,25 @@ const ownerCreateBooking = async (req, res) => {
       }],
     });
 
-    // 6. Atomic table reservation
-    if (assignedTables.length > 0) {
-      const reservation = await bookingService.reserveTables(restaurantId, assignedTables, bookingDate, bookingTime, booking._id);
-      if (!reservation.success) {
-        return res.status(409).json({ success: false, message: reservation.message, errorCode: reservation.error });
-      }
+    // 6. Booking and every table slot commit atomically.
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        await booking.save({ session });
+        if (assignedTables.length > 0) {
+          const reservation = await bookingService.reserveTables(
+            restaurantId, assignedTables, bookingDate, bookingTime, booking._id, { session },
+          );
+          if (!reservation.success) {
+            const reservationError = new Error(reservation.message);
+            reservationError.code = reservation.error;
+            throw reservationError;
+          }
+        }
+      });
+    } finally {
+      await session.endSession();
     }
-
-    await booking.save();
 
     // 7. Log activity & notify
     logActivity(restaurantId, 'booking_created', req.user._id, req.user.role,
@@ -1178,6 +1182,9 @@ const ownerCreateBooking = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ [OwnerCreateBooking] Lỗi:', error.message);
+    if (error.code === 'TABLE_ALREADY_RESERVED') {
+      return res.status(409).json({ success: false, message: error.message, errorCode: error.code });
+    }
     return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi tạo đặt bàn thủ công' });
   }
 };
@@ -1264,6 +1271,8 @@ const addCustomerTag = async (req, res) => {
   }
 };
 
+
+
 /**
  * Q. Remove Customer Tag (DELETE /api/v1/owner/bookings/customer-tag/:id)
  */
@@ -1285,6 +1294,7 @@ module.exports = {
   getRestaurantBookings,
   getBookingDetail,
   confirmBooking,
+  checkInBooking,
   cancelBooking,
   completeBooking,
   markNoShow,

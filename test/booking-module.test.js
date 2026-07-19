@@ -12,6 +12,7 @@ const TableReservation = require('../src/models/TableReservation');
 const Booking = require('../src/models/Booking');
 const emailService = require('../src/services/email.service');
 const bookingController = require('../src/controllers/booking.controller');
+const bookingService = require('../src/services/booking.service');
 const ownerBookingController = require('../src/controllers/owner.booking.controller');
 const adminBookingController = require('../src/controllers/admin.booking.controller');
 const { verifyOwnerBookingAccess } = require('../src/middleware/booking.middleware');
@@ -363,10 +364,13 @@ test('owner can confirm, complete, mark no-show, change table, and wrong owner i
     assert.deepEqual(changeRes.body.data.tableNumbers, [fixture.tableB.tableNumber]);
 
     const changedReservations = await TableReservation.find({ bookingId: booking._id });
-    assert.deepEqual(changedReservations.map((item) => item.tableNumber), [fixture.tableB.tableNumber]);
+    assert.deepEqual([...new Set(changedReservations.map((item) => item.tableNumber))], [fixture.tableB.tableNumber]);
+    assert.ok(changedReservations.length > 1, 'booking duration must be protected by multiple reservation slots');
 
     const changed = await Booking.findById(booking._id);
-    const completeRes = await callController(
+    changed.checkedInAt = new Date();
+    await changed.save();
+    const earlyCompleteRes = await callController(
       ownerBookingController.completeBooking,
       createRequest({
         user: fixture.owner,
@@ -375,8 +379,8 @@ test('owner can confirm, complete, mark no-show, change table, and wrong owner i
         body: { actualGuestCount: 2 },
       }),
     );
-    assert.equal(completeRes.statusCode, 200);
-    assert.equal(completeRes.body.data.status, 'completed');
+    assert.equal(earlyCompleteRes.statusCode, 200);
+    assert.equal(earlyCompleteRes.body.data.status, 'completed');
     assert.equal(await TableReservation.countDocuments({ bookingId: booking._id }), 0);
 
     const noShowBooking = await Booking.create({
@@ -393,6 +397,17 @@ test('owner can confirm, complete, mark no-show, change table, and wrong owner i
       statusHistory: [{ status: 'confirmed', changedBy: fixture.owner._id, note: 'seed confirmed' }],
     });
 
+    const earlyNoShowRes = await callController(
+      ownerBookingController.markNoShow,
+      createRequest({
+        user: fixture.owner,
+        booking: noShowBooking,
+        restaurant: fixture.restaurant,
+      }),
+    );
+    assert.equal(earlyNoShowRes.statusCode, 409);
+    noShowBooking.bookingDate = normalizeDateForQuery(futureDateString(-2));
+    await noShowBooking.save();
     const noShowRes = await callController(
       ownerBookingController.markNoShow,
       createRequest({
@@ -527,6 +542,139 @@ test('booking email functions exist and are called without blocking booking stat
     assert.deepEqual(calls, ['created', 'confirmed', 'cancelled']);
   } finally {
     Object.assign(emailService, originals);
+    await cleanup(suffix);
+  }
+});
+
+test('database slot keys reject overlapping minute offsets and roll back multi-table inserts', async () => {
+  const suffix = `booking_slots_${Date.now()}`;
+  await cleanup(suffix);
+  try {
+    const fixture = await createFixture(suffix);
+    const date = futureDateString();
+    const winnerId = new mongoose.Types.ObjectId();
+    const loserId = new mongoose.Types.ObjectId();
+
+    const [first, second] = await Promise.all([
+      bookingService.reserveTables(
+        fixture.restaurant._id, [fixture.tableA.tableNumber], date, '18:05', winnerId,
+      ),
+      bookingService.reserveTables(
+        fixture.restaurant._id, [fixture.tableA.tableNumber], date, '18:10', loserId,
+      ),
+    ]);
+    assert.equal([first.success, second.success].filter(Boolean).length, 1);
+
+    const occupiedBookingId = first.success ? winnerId : loserId;
+    const multiTableBookingId = new mongoose.Types.ObjectId();
+    const multi = await bookingService.reserveTables(
+      fixture.restaurant._id,
+      [fixture.tableB.tableNumber, fixture.tableA.tableNumber],
+      date,
+      '18:07',
+      multiTableBookingId,
+    );
+    assert.equal(multi.success, false);
+    assert.equal(
+      await TableReservation.countDocuments({ bookingId: multiTableBookingId }),
+      0,
+      'transaction must remove slots inserted before the conflicting table',
+    );
+    assert.ok(await TableReservation.countDocuments({ bookingId: occupiedBookingId }));
+  } finally {
+    await cleanup(suffix);
+  }
+});
+
+test('failed reschedule preserves both the old booking fields and old reservation slots', async () => {
+  const suffix = `booking_reschedule_${Date.now()}`;
+  await cleanup(suffix);
+  try {
+    const fixture = await createFixture(suffix);
+    const oldDate = futureDateString(5);
+    const newDate = futureDateString(6);
+    const booking = await Booking.create({
+      customerId: fixture.customer._id,
+      restaurantId: fixture.restaurant._id,
+      bookingDate: normalizeDateForQuery(oldDate),
+      bookingTime: '18:00',
+      numberOfGuests: 2,
+      customerName: 'Booking Customer',
+      customerPhone: '0901234567',
+      customerEmail: `${suffix}_customer@example.com`,
+      tableNumbers: [fixture.tableA.tableNumber],
+      status: 'pending',
+      statusHistory: [{ status: 'pending', changedBy: fixture.customer._id, note: 'seed' }],
+    });
+    assert.equal((await bookingService.reserveTables(
+      fixture.restaurant._id, [fixture.tableA.tableNumber], oldDate, '18:00', booking._id,
+    )).success, true);
+    const blockerId = new mongoose.Types.ObjectId();
+    assert.equal((await bookingService.reserveTables(
+      fixture.restaurant._id, [fixture.tableB.tableNumber], newDate, '19:00', blockerId,
+    )).success, true);
+    const oldSlotCount = await TableReservation.countDocuments({ bookingId: booking._id });
+
+    await assert.rejects(
+      bookingService.rescheduleBookingAtomic({
+        bookingId: booking._id,
+        bookingDate: newDate,
+        bookingTime: '19:00',
+        tableNumbers: [fixture.tableB.tableNumber],
+        actorId: fixture.customer._id,
+      }),
+      (error) => error.code === 'TABLE_ALREADY_RESERVED',
+    );
+
+    const unchanged = await Booking.findById(booking._id);
+    assert.equal(unchanged.bookingDate.toISOString().slice(0, 10), oldDate);
+    assert.equal(unchanged.bookingTime, '18:00');
+    assert.deepEqual(unchanged.tableNumbers, [fixture.tableA.tableNumber]);
+    assert.equal(await TableReservation.countDocuments({ bookingId: booking._id }), oldSlotCount);
+  } finally {
+    await cleanup(suffix);
+  }
+});
+
+test('owner manual guest booking keeps customerId null and cancels without a fake wallet refund', async () => {
+  const suffix = `booking_guest_${Date.now()}`;
+  await cleanup(suffix);
+  try {
+    const fixture = await createFixture(suffix);
+    const createRes = await callController(
+      ownerBookingController.ownerCreateBooking,
+      createRequest({
+        user: fixture.owner,
+        body: {
+          restaurantId: fixture.restaurant._id.toString(),
+          bookingDate: futureDateString(),
+          bookingTime: '18:00',
+          numberOfGuests: 2,
+          customerName: 'Walk-in Guest',
+          customerPhone: '0907654321',
+          customerEmail: '',
+          tableNumbers: [fixture.tableA.tableNumber],
+          setConfirmed: true,
+        },
+      }),
+    );
+    assert.equal(createRes.statusCode, 201);
+    const guestBooking = await Booking.findById(createRes.body.data._id || createRes.body.data.id);
+    assert.equal(guestBooking.customerId, null);
+
+    const cancelRes = await callController(
+      ownerBookingController.cancelBooking,
+      createRequest({
+        user: fixture.owner,
+        booking: guestBooking,
+        restaurant: fixture.restaurant,
+        body: { reason: 'Khách vãng lai đổi lịch' },
+      }),
+    );
+    assert.equal(cancelRes.statusCode, 200);
+    assert.equal(cancelRes.body.data.refundAmount, 0);
+    assert.equal(await TableReservation.countDocuments({ bookingId: guestBooking._id }), 0);
+  } finally {
     await cleanup(suffix);
   }
 });

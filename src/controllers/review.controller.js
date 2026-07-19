@@ -59,7 +59,7 @@ const createReview = async (req, res) => {
       });
     }
 
-    if (booking.customerId.toString() !== userId.toString()) {
+    if (!booking.customerId || booking.customerId.toString() !== userId.toString()) {
       return res.status(403).json({
         success: false,
         message: 'Bạn không có quyền đánh giá booking này',

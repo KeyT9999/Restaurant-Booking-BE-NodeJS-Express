@@ -44,7 +44,7 @@ const withdrawalRequestSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['pending', 'approved', 'rejected', 'completed'],
+      enum: ['pending', 'approved', 'processing', 'completed', 'rejected', 'cancelled', 'failed'],
       default: 'pending',
       index: true,
     },
@@ -66,6 +66,9 @@ const withdrawalRequestSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    idempotencyKey: { type: String, default: null },
+    balanceHeldAt: { type: Date, default: null },
+    balanceReleasedAt: { type: Date, default: null },
   },
   {
     timestamps: true,
@@ -75,5 +78,9 @@ const withdrawalRequestSchema = new mongoose.Schema(
 withdrawalRequestSchema.index({ ownerId: 1, status: 1 });
 withdrawalRequestSchema.index({ restaurantId: 1, status: 1 });
 withdrawalRequestSchema.index({ status: 1, createdAt: -1 });
+withdrawalRequestSchema.index(
+  { ownerId: 1, idempotencyKey: 1 },
+  { unique: true, partialFilterExpression: { idempotencyKey: { $type: 'string' } } },
+);
 
 module.exports = mongoose.model('WithdrawalRequest', withdrawalRequestSchema);

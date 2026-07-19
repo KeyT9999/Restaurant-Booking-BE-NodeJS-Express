@@ -2,6 +2,7 @@
 
 const WithdrawalRequest = require('../models/WithdrawalRequest');
 const Restaurant = require('../models/Restaurant');
+const withdrawalService = require('../services/withdrawal.service');
 
 // Hỗ trợ gửi thông báo Socket.io realtime
 const emitNotification = (io, room, event, payload) => {
@@ -67,21 +68,10 @@ const approveWithdrawal = async (req, res) => {
     const { adminNote } = req.body || {};
     const adminId = req.user._id;
 
-    const withdrawal = await WithdrawalRequest.findById(id);
-    if (!withdrawal) {
-      return res.status(404).json({ success: false, message: 'Không tìm thấy yêu cầu rút tiền' });
-    }
-
-    if (withdrawal.status !== 'pending') {
-      return res.status(400).json({ success: false, message: 'Chỉ có thể duyệt yêu cầu rút tiền đang chờ xử lý (pending)' });
-    }
-
-    withdrawal.status = 'approved';
-    withdrawal.adminNote = adminNote ? adminNote.trim() : 'Đã duyệt yêu cầu rút tiền';
-    withdrawal.reviewedBy = adminId;
-    withdrawal.reviewedAt = new Date();
-
-    await withdrawal.save();
+    const withdrawal = await withdrawalService.transition({
+      withdrawalId: id, expectedStatuses: ['pending'], nextStatus: 'approved', actorId: adminId,
+      adminNote: adminNote ? adminNote.trim() : 'Đã duyệt yêu cầu rút tiền',
+    });
 
     // Gửi socket notify cho Owner
     const io = req.app.get('io');
@@ -100,6 +90,7 @@ const approveWithdrawal = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ [ApproveWithdrawal] Lỗi:', error.message);
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message });
     return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi duyệt yêu cầu rút tiền' });
   }
 };
@@ -114,25 +105,13 @@ const rejectWithdrawal = async (req, res) => {
     const adminId = req.user._id;
 
     if (!adminNote || adminNote.trim().length === 0) {
-      // return res.status(400).json({ success: false, message: 'Lý do từ chối (adminNote) là bắt buộc' });
-      // Thay vì báo lỗi, cho phép từ chối mà không cần lý do (gán mặc định)
+      return res.status(400).json({ success: false, message: 'Lý do từ chối (adminNote) là bắt buộc' });
     }
 
-    const withdrawal = await WithdrawalRequest.findById(id);
-    if (!withdrawal) {
-      return res.status(404).json({ success: false, message: 'Không tìm thấy yêu cầu rút tiền' });
-    }
-
-    if (withdrawal.status !== 'pending') {
-      return res.status(400).json({ success: false, message: 'Chỉ có thể từ chối yêu cầu rút tiền đang chờ xử lý (pending)' });
-    }
-
-    withdrawal.status = 'rejected';
-    withdrawal.adminNote = adminNote ? adminNote.trim() : 'Từ chối yêu cầu rút tiền';
-    withdrawal.reviewedBy = adminId;
-    withdrawal.reviewedAt = new Date();
-
-    await withdrawal.save();
+    const withdrawal = await withdrawalService.transition({
+      withdrawalId: id, expectedStatuses: ['pending', 'approved'], nextStatus: 'rejected', actorId: adminId,
+      adminNote: adminNote.trim(), releaseFunds: true,
+    });
 
     // Gửi socket notify cho Owner
     const io = req.app.get('io');
@@ -150,6 +129,7 @@ const rejectWithdrawal = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ [RejectWithdrawal] Lỗi:', error.message);
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message });
     return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi từ chối yêu cầu rút tiền' });
   }
 };
@@ -163,30 +143,10 @@ const completeWithdrawal = async (req, res) => {
     const { adminNote, proofImage } = req.body || {};
     const adminId = req.user._id;
 
-    const withdrawal = await WithdrawalRequest.findById(id);
-    if (!withdrawal) {
-      return res.status(404).json({ success: false, message: 'Không tìm thấy yêu cầu rút tiền' });
-    }
-
-    if (withdrawal.status !== 'approved' && withdrawal.status !== 'pending') {
-      return res.status(400).json({ success: false, message: 'Yêu cầu rút tiền phải ở trạng thái pending hoặc approved để hoàn tất' });
-    }
-
-    withdrawal.status = 'completed';
-    if (adminNote) {
-      withdrawal.adminNote = adminNote.trim();
-    }
-    if (proofImage) {
-      withdrawal.proofImage = proofImage;
-    }
-    withdrawal.completedAt = new Date();
-    // Nếu chưa review thì gán admin review luôn
-    if (!withdrawal.reviewedBy) {
-      withdrawal.reviewedBy = adminId;
-      withdrawal.reviewedAt = new Date();
-    }
-
-    await withdrawal.save();
+    const withdrawal = await withdrawalService.transition({
+      withdrawalId: id, expectedStatuses: ['approved', 'processing'], nextStatus: 'completed', actorId: adminId,
+      adminNote: adminNote ? adminNote.trim() : undefined, proofImage, releaseFunds: false,
+    });
 
     // Gửi socket notify cho Owner
     const io = req.app.get('io');
@@ -204,6 +164,7 @@ const completeWithdrawal = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ [CompleteWithdrawal] Lỗi:', error.message);
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message });
     return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi hoàn tất yêu cầu rút tiền' });
   }
 };

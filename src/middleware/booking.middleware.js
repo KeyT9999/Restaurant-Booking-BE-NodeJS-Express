@@ -102,7 +102,7 @@ const verifyCustomerBookingAccess = async (req, res, next) => {
       });
     }
 
-    if (booking.customerId.toString() !== req.user._id.toString()) {
+    if (!booking.customerId || booking.customerId.toString() !== req.user._id.toString()) {
       return res.status(403).json({
         success: false,
         message: 'Bạn không có quyền truy cập đặt bàn này',

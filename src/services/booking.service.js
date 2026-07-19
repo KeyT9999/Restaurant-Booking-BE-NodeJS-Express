@@ -1,16 +1,20 @@
 'use strict';
 
+const mongoose = require('mongoose');
 const Booking = require('../models/Booking');
 const RestaurantTable = require('../models/RestaurantTable');
 const Restaurant = require('../models/Restaurant');
 const User = require('../models/User');
 const TableReservation = require('../models/TableReservation');
 const BlockedSlot = require('../models/BlockedSlot');
+const bookingConfig = require('../config/booking.config');
+const bookingTimeUtils = require('../utils/booking-time');
 
 const BOOKING_CONSTANTS = {
   MIN_BOOKING_ADVANCE_MINUTES: 30,
   MAX_BOOKING_ADVANCE_DAYS: 30,
-  BOOKING_DURATION_HOURS: 2,
+  BOOKING_DURATION_HOURS: bookingConfig.durationMinutes / 60,
+  BOOKING_DURATION_MINUTES: bookingConfig.durationMinutes,
   BUFFER_BEFORE_MINUTES: 90,
   BUFFER_AFTER_MINUTES: 120,
   DEFAULT_OPEN_TIME: '10:00',
@@ -33,21 +37,12 @@ const canTransitionBookingStatus = (currentStatus, nextStatus) => {
 /**
  * Normalizes a date to UTC midnight.
  */
-const normalizeDate = (dateInput) => {
-  const d = new Date(dateInput);
-  d.setUTCHours(0, 0, 0, 0);
-  return d;
-};
+const normalizeDate = bookingTimeUtils.normalizeBusinessDate;
 
 /**
  * Combines a date object/string and a HH:mm time string into a single JS Date.
  */
-const combineDateAndTime = (date, timeString) => {
-  const d = new Date(date);
-  const [hours, minutes] = timeString.split(':').map(Number);
-  d.setUTCHours(hours, minutes, 0, 0);
-  return d;
-};
+const combineDateAndTime = bookingTimeUtils.combineBusinessDateAndTime;
 
 /**
  * Checks if a proposed booking time overlaps with an existing booking.
@@ -117,7 +112,7 @@ const validateBookingTime = async (bookingDate, bookingTime, restaurant) => {
 
   // 4. Validate against operating hours
   const daysOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-  const dayName = daysOfWeek[new Date(bookingDate).getUTCDay()];
+  const dayName = bookingTimeUtils.getBusinessWeekday(bookingDate);
   
   const hours = restaurant.operatingHours?.[dayName] || {
     open: BOOKING_CONSTANTS.DEFAULT_OPEN_TIME,
@@ -406,18 +401,38 @@ const checkUserBookingBlock = async (userId) => {
  * Uses unique compound index on TableReservation for MongoDB-level locking.
  * Returns { success: true } or { success: false, error: 'TABLE_ALREADY_RESERVED', tableNumber }
  */
-const reserveTables = async (restaurantId, tableNumbers, bookingDate, bookingTime, bookingId) => {
-  const normalizedDate = normalizeDate(bookingDate);
-  const reservations = tableNumbers.map((tableNumber) => ({
-    restaurantId,
-    tableNumber,
-    bookingDate: normalizedDate,
-    bookingTime,
-    bookingId,
-  }));
+const reserveTables = async (restaurantId, tableNumbers, bookingDate, bookingTime, bookingId, options = {}) => {
+  if (!options.session) {
+    const ownedSession = await mongoose.startSession();
+    try {
+      let result;
+      await ownedSession.withTransaction(async () => {
+        result = await reserveTables(
+          restaurantId, tableNumbers, bookingDate, bookingTime, bookingId, { session: ownedSession },
+        );
+        if (!result.success) {
+          const error = new Error(result.message);
+          error.code = result.error;
+          throw error;
+        }
+      });
+      return result;
+    } catch (error) {
+      if (error?.code === 'TABLE_ALREADY_RESERVED' || error?.code === 11000) {
+        return { success: false, error: 'TABLE_ALREADY_RESERVED', message: error.message };
+      }
+      throw error;
+    } finally {
+      await ownedSession.endSession();
+    }
+  }
+  const reservations = buildReservationSlots(restaurantId, tableNumbers, bookingDate, bookingTime, bookingId);
 
   try {
-    await TableReservation.insertMany(reservations, { ordered: true });
+    await TableReservation.insertMany(reservations, {
+      ordered: true,
+      session: options.session || undefined,
+    });
     return { success: true };
   } catch (err) {
     if (err.code === 11000) {
@@ -438,8 +453,39 @@ const reserveTables = async (restaurantId, tableNumbers, bookingDate, bookingTim
 /**
  * Release table reservations (for cancelled/failed bookings)
  */
-const releaseTableReservations = async (bookingId) => {
-  await TableReservation.deleteMany({ bookingId });
+const releaseTableReservations = async (bookingId, options = {}) => {
+  const query = TableReservation.deleteMany({ bookingId });
+  if (options.session) query.session(options.session);
+  await query;
+};
+
+const buildReservationSlots = (restaurantId, tableNumbers, bookingDate, bookingTime, bookingId) => {
+  const startAt = bookingTimeUtils.getBookingStartAt(bookingDate, bookingTime);
+  const endAt = bookingTimeUtils.getBookingEndAt(bookingDate, bookingConfig.durationMinutes, bookingTime);
+  const slotMilliseconds = bookingConfig.reservationSlotMinutes * 60_000;
+  // Align every reservation to a global slot grid. Without floor/ceil alignment,
+  // 18:05 and 18:10 would generate different keys even though they overlap.
+  const occupiedStart = startAt.getTime() - BOOKING_CONSTANTS.BUFFER_BEFORE_MINUTES * 60_000;
+  const occupiedEnd = endAt.getTime() + BOOKING_CONSTANTS.BUFFER_AFTER_MINUTES * 60_000;
+  const firstSlot = Math.floor(occupiedStart / slotMilliseconds) * slotMilliseconds;
+  const afterLastSlot = Math.ceil(occupiedEnd / slotMilliseconds) * slotMilliseconds;
+  const reservations = [];
+  for (const tableNumber of [...new Set(tableNumbers)]) {
+    for (let cursor = firstSlot; cursor < afterLastSlot; cursor += slotMilliseconds) {
+      const slotStartUtc = new Date(cursor);
+      const localSlotIso = bookingTimeUtils.toBusinessIsoString(slotStartUtc);
+      reservations.push({
+        restaurantId,
+        tableNumber,
+        bookingDate: normalizeDate(localSlotIso.slice(0, 10)),
+        bookingTime: localSlotIso.slice(11, 16),
+        bookingId,
+        slotStartUtc,
+        slotEndUtc: new Date(cursor + slotMilliseconds),
+      });
+    }
+  }
+  return reservations;
 };
 
 /**
@@ -452,42 +498,178 @@ const replaceTableReservations = async (
   tableNumbers,
   bookingDate,
   bookingTime,
-  bookingId
+  bookingId,
+  options = {},
 ) => {
-  const desiredTableNumbers = [...new Set(tableNumbers)];
-  const currentReservations = await TableReservation.find({ bookingId }).select('tableNumber');
-  const currentTableNumbers = new Set(currentReservations.map((item) => item.tableNumber));
-  const addedTableNumbers = desiredTableNumbers.filter((tableNumber) => !currentTableNumbers.has(tableNumber));
-  const removedTableNumbers = [...currentTableNumbers].filter((tableNumber) => !desiredTableNumbers.includes(tableNumber));
-
-  if (addedTableNumbers.length > 0) {
-    const reservation = await reserveTables(
-      restaurantId,
-      addedTableNumbers,
-      bookingDate,
-      bookingTime,
-      bookingId
-    );
-
-    if (!reservation.success) {
-      // insertMany may have inserted an earlier item before a duplicate-key failure.
-      await TableReservation.deleteMany({ bookingId, tableNumber: { $in: addedTableNumbers } });
-      return reservation;
+  const session = options.session || null;
+  if (!session) {
+    const ownedSession = await mongoose.startSession();
+    try {
+      let result;
+      await ownedSession.withTransaction(async () => {
+        result = await replaceTableReservations(
+          restaurantId, tableNumbers, bookingDate, bookingTime, bookingId, { session: ownedSession },
+        );
+        if (!result.success) {
+          const error = new Error(result.message);
+          error.code = result.error;
+          throw error;
+        }
+      });
+      return result;
+    } catch (error) {
+      if (error?.code === 'TABLE_ALREADY_RESERVED' || error?.code === 11000) {
+        return { success: false, error: 'TABLE_ALREADY_RESERVED', message: error.message };
+      }
+      throw error;
+    } finally {
+      await ownedSession.endSession();
     }
   }
+  const desired = buildReservationSlots(restaurantId, tableNumbers, bookingDate, bookingTime, bookingId);
+  const currentQuery = TableReservation.find({ bookingId });
+  if (session) currentQuery.session(session);
+  const current = await currentQuery;
+  const keyOf = (item) => `${item.tableNumber}:${new Date(item.slotStartUtc).toISOString()}`;
+  const currentKeys = new Set(current.filter((item) => item.slotStartUtc).map(keyOf));
+  const desiredKeys = new Set(desired.map(keyOf));
+  const additions = desired.filter((item) => !currentKeys.has(keyOf(item)));
+  const removalIds = current
+    .filter((item) => !item.slotStartUtc || !desiredKeys.has(keyOf(item)))
+    .map((item) => item._id);
 
   try {
-    if (removedTableNumbers.length > 0) {
-      await TableReservation.deleteMany({ bookingId, tableNumber: { $in: removedTableNumbers } });
+    if (additions.length) {
+      await TableReservation.insertMany(additions, { ordered: true, session: session || undefined });
     }
+    if (removalIds.length) {
+      const removal = TableReservation.deleteMany({ bookingId, _id: { $in: removalIds } });
+      if (session) removal.session(session);
+      await removal;
+    }
+    return { success: true };
   } catch (error) {
-    if (addedTableNumbers.length > 0) {
-      await TableReservation.deleteMany({ bookingId, tableNumber: { $in: addedTableNumbers } });
+    if (error?.code === 11000) {
+      return {
+        success: false,
+        error: 'TABLE_ALREADY_RESERVED',
+        message: 'Một hoặc nhiều bàn vừa được khách khác đặt. Vui lòng chọn lại.',
+      };
     }
     throw error;
   }
+};
 
-  return { success: true };
+const confirmBookingAtomic = async ({ bookingId, actorId }) => {
+  const session = await mongoose.startSession();
+  try {
+    let updatedBooking;
+    await session.withTransaction(async () => {
+      const booking = await Booking.findOne({ _id: bookingId, status: 'pending' }).session(session);
+      if (!booking) {
+        const error = new Error('Booking không còn ở trạng thái chờ xác nhận');
+        error.code = 'BOOKING_NOT_CONFIRMABLE';
+        throw error;
+      }
+      const reservation = await replaceTableReservations(
+        booking.restaurantId, booking.tableNumbers, booking.bookingDate,
+        booking.bookingTime, booking._id, { session },
+      );
+      if (!reservation.success) {
+        const error = new Error(reservation.message);
+        error.code = reservation.error;
+        throw error;
+      }
+      booking.status = 'confirmed';
+      booking.confirmedAt = new Date();
+      booking.confirmedBy = actorId;
+      booking.statusHistory.push({
+        status: 'confirmed', changedBy: actorId,
+        note: 'Nhà hàng xác nhận đặt bàn',
+      });
+      updatedBooking = await booking.save({ session });
+    });
+    return updatedBooking;
+  } finally {
+    await session.endSession();
+  }
+};
+
+const changeBookingTablesAtomic = async ({ bookingId, tableNumbers, actorId }) => {
+  const session = await mongoose.startSession();
+  try {
+    let updatedBooking;
+    await session.withTransaction(async () => {
+      const booking = await Booking.findOne({ _id: bookingId, status: { $in: ['pending', 'confirmed'] } }).session(session);
+      if (!booking) {
+        const error = new Error('Booking không còn ở trạng thái có thể đổi bàn');
+        error.code = 'BOOKING_NOT_RESCHEDULABLE';
+        throw error;
+      }
+      const oldTables = [...(booking.tableNumbers || [])];
+      const reservation = await replaceTableReservations(
+        booking.restaurantId, tableNumbers, booking.bookingDate,
+        booking.bookingTime, booking._id, { session },
+      );
+      if (!reservation.success) {
+        const error = new Error(reservation.message);
+        error.code = reservation.error;
+        throw error;
+      }
+      booking.tableNumbers = [...new Set(tableNumbers)];
+      booking.statusHistory.push({
+        status: booking.status, changedBy: actorId,
+        note: `Thay đổi bàn ăn từ [${oldTables.join(', ')}] sang [${booking.tableNumbers.join(', ')}]`,
+      });
+      updatedBooking = await booking.save({ session });
+    });
+    return updatedBooking;
+  } finally {
+    await session.endSession();
+  }
+};
+
+const rescheduleBookingAtomic = async ({ bookingId, bookingDate, bookingTime, tableNumbers, actorId, depositAmount }) => {
+  const session = await mongoose.startSession();
+  try {
+    let updatedBooking;
+    await session.withTransaction(async () => {
+      const booking = await Booking.findById(bookingId).session(session);
+      if (!booking || !['pending', 'confirmed'].includes(booking.status)) {
+        const error = new Error('Booking không còn ở trạng thái có thể đổi lịch');
+        error.code = 'BOOKING_NOT_RESCHEDULABLE';
+        throw error;
+      }
+      const reservation = await replaceTableReservations(
+        booking.restaurantId, tableNumbers, bookingDate, bookingTime, booking._id, { session },
+      );
+      if (!reservation.success) {
+        const error = new Error(reservation.message);
+        error.code = reservation.error;
+        throw error;
+      }
+      const oldDate = booking.bookingDate;
+      const oldTime = booking.bookingTime;
+      booking.bookingDate = normalizeDate(bookingDate);
+      booking.bookingTime = bookingTime;
+      booking.tableNumbers = [...new Set(tableNumbers)];
+      if (depositAmount !== undefined) {
+        booking.depositAmount = depositAmount;
+        booking.originalAmount = depositAmount;
+        booking.finalAmount = Math.max(0, depositAmount - (booking.discountAmount || 0));
+      }
+      booking.rescheduleHistory.push({
+        fromDate: oldDate, fromTime: oldTime,
+        toDate: booking.bookingDate, toTime: bookingTime,
+        rescheduledAt: new Date(), rescheduledBy: actorId,
+      });
+      await booking.save({ session });
+      updatedBooking = booking;
+    });
+    return updatedBooking;
+  } finally {
+    await session.endSession();
+  }
 };
 
 // ─── Table Hold Functions ───
@@ -586,7 +768,7 @@ const getHeldTableNumbers = async ({ restaurantId, bookingDate, bookingTime, exc
  * Xử lý một đặt bàn đã quá hạn (Auto-complete hoặc Auto-no-show).
  * Đảm bảo atomic update trạng thái bằng findOneAndUpdate để chống race condition.
  */
-const processExpiredBooking = async (bookingId, now, io = null) => {
+const processExpiredBooking = async (bookingId, now = new Date(), io = null, options = {}) => {
   const notificationService = require('./notification.service');
   const bookingCommissionService = require('./booking-commission.service');
 
@@ -596,14 +778,23 @@ const processExpiredBooking = async (bookingId, now, io = null) => {
     return { success: false, reason: 'Booking không tồn tại hoặc không ở trạng thái confirmed' };
   }
 
-  // Kiểm tra thời gian kết thúc của booking
-  const bookingDateTime = combineDateAndTime(checkBooking.bookingDate, checkBooking.bookingTime || '00:00');
-  const bookingEndTime = new Date(bookingDateTime.getTime() + BOOKING_CONSTANTS.BOOKING_DURATION_HOURS * 60 * 60 * 1000);
-  if (bookingEndTime > now) {
-    return { success: false, reason: 'Booking chưa quá hạn' };
+  // Kiểm tra thời gian kết thúc của booking (bỏ qua nếu có cờ bypassExpiry)
+  if (!options.bypassExpiry) {
+    const bookingEndTime = bookingTimeUtils.getLifecycleDeadline(checkBooking);
+    if (bookingEndTime > now) {
+      return { success: false, reason: 'Booking chưa quá hạn' };
+    }
   }
 
   const targetStatus = checkBooking.checkedInAt ? 'completed' : 'no_show';
+  if (options.expectedStatus && options.expectedStatus !== targetStatus) {
+    return {
+      success: false,
+      reason: targetStatus === 'completed'
+        ? 'Booking đã check-in nên không thể đánh dấu no-show'
+        : 'Booking chưa check-in nên không thể hoàn thành',
+    };
+  }
 
   // 2. Thực hiện atomic update trạng thái để đảm bảo không ai khác cập nhật cùng lúc
   const booking = await Booking.findOneAndUpdate(
@@ -614,15 +805,18 @@ const processExpiredBooking = async (bookingId, now, io = null) => {
     {
       $set: {
         status: targetStatus,
-        completedAt: targetStatus === 'completed' ? now : null
+        completedAt: targetStatus === 'completed' ? now : null,
+        ...(targetStatus === 'completed' && options.actualGuestCount !== undefined
+          ? { actualGuestCount: options.actualGuestCount }
+          : {}),
       },
       $push: {
         statusHistory: {
           status: targetStatus,
-          changedBy: null,
-          note: targetStatus === 'completed' 
-            ? 'Tự động hoàn tất sau giờ đặt (khách đã check-in)' 
-            : 'Tự động đánh dấu vắng mặt (quá giờ đặt bàn + 2h, chưa check-in)',
+          changedBy: options.actorId || null,
+          note: options.reason || (targetStatus === 'completed'
+            ? 'Tự động hoàn tất sau giờ đặt (khách đã check-in)'
+            : 'Tự động đánh dấu vắng mặt sau lifecycle deadline (chưa check-in)'),
           changedAt: now
         }
       }
@@ -635,7 +829,9 @@ const processExpiredBooking = async (bookingId, now, io = null) => {
   }
 
   // 3. Giải phóng bàn ăn
-  await releaseTableReservations(booking._id).catch(() => {});
+  // Resolve through exports so tests and operational wrappers can replace the
+  // reservation cleanup dependency without changing lifecycle semantics.
+  await module.exports.releaseTableReservations(booking._id).catch(() => {});
 
   const restaurant = await Restaurant.findById(booking.restaurantId);
 
@@ -655,7 +851,7 @@ const processExpiredBooking = async (bookingId, now, io = null) => {
     await bookingCommissionService.createLedgerForBooking(booking._id, {
       booking,
       restaurant,
-      source: booking.sourceAiPendingActionId ? 'ai_booking_completed' : 'owner_booking_completed',
+      source: options.source || (booking.sourceAiPendingActionId ? 'ai_booking_completed' : 'booking_lifecycle_completed'),
     }).catch((err) => console.warn(`[BookingCommission] ${err.message}`));
 
   } else {
@@ -676,7 +872,7 @@ const processExpiredBooking = async (bookingId, now, io = null) => {
   }
 
   // 5. Gửi thông báo (Real-time Socket & Notifications)
-  if (io) {
+  if (io && booking.customerId) {
     const room = `user:${booking.customerId.toString()}`;
     const event = `booking:${targetStatus}`;
     io.to(room).emit(event, {
@@ -690,7 +886,7 @@ const processExpiredBooking = async (bookingId, now, io = null) => {
       booking,
       restaurant,
       status: targetStatus,
-      actorRole: 'system',
+      actorRole: options.actorRole || 'system',
     }).catch((error) => {
       console.warn(`[Notification Expired Booking] ${error.message}`);
     });
@@ -703,6 +899,7 @@ module.exports = {
   BOOKING_CONSTANTS,
   BOOKING_STATUS_TRANSITIONS,
   canTransitionBookingStatus,
+  buildReservationSlots,
   normalizeDate,
   combineDateAndTime,
   checkTimeConflict,
@@ -716,6 +913,9 @@ module.exports = {
   reserveTables,
   releaseTableReservations,
   replaceTableReservations,
+  confirmBookingAtomic,
+  changeBookingTablesAtomic,
+  rescheduleBookingAtomic,
   holdTables,
   releaseHolds,
   getHeldTableNumbers,

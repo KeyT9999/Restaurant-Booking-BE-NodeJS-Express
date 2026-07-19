@@ -348,6 +348,8 @@ exports.getRestaurantDashboard = async (req, res) => {
           averageRating: restaurant.stats?.averageRating || 0,
           totalReviews: restaurant.stats?.totalReviews || 0,
           balance: restaurant.balance || 0,
+          availableBalance: restaurant.availableBalance ?? restaurant.balance ?? 0,
+          pendingWithdrawalBalance: restaurant.pendingWithdrawalBalance || 0,
           totalRevenue: restaurant.totalRevenue || 0,
         },
       },

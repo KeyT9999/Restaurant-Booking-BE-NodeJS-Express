@@ -19,6 +19,7 @@ router.post('/bookings/create', ownerBookingController.ownerCreateBooking);
 router.post('/bookings/bulk-cancel', ownerBookingController.bulkCancelBooking);
 router.get('/bookings/:id', verifyOwnerBookingAccess, ownerBookingController.getBookingDetail);
 router.put('/bookings/:id/confirm', verifyOwnerBookingAccess, ownerBookingController.confirmBooking);
+router.put('/bookings/:id/checkin', verifyOwnerBookingAccess, ownerBookingController.checkInBooking);
 router.put('/bookings/:id/cancel', verifyOwnerBookingAccess, ownerBookingController.cancelBooking);
 router.put('/bookings/:id/complete', verifyOwnerBookingAccess, ownerBookingController.completeBooking);
 router.put('/bookings/:id/no-show', verifyOwnerBookingAccess, ownerBookingController.markNoShow);

@@ -4,8 +4,9 @@ const bookingService = require('../../booking.service');
 const restaurantQueryService = require('../../restaurant-query.service');
 const voucherService = require('../../voucher.service');
 const { makeToolError } = require('./public-customer.tools');
+const bookingTimeUtils = require('../../../utils/booking-time');
 
-const BOOKEAT_TIMEZONE = 'Asia/Ho_Chi_Minh';
+const BOOKEAT_TIMEZONE = bookingTimeUtils.BUSINESS_TIME_ZONE;
 
 const asStringOrNull = (value) => {
   if (typeof value !== 'string') return null;
@@ -22,7 +23,7 @@ const isValidDateString = (value) => {
 const isValidTimeString = (value) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(value || ''));
 
 const toLocalDateTimeLabel = (bookingDate, bookingTime) => (
-  `${bookingDate}T${bookingTime}:00+07:00`
+  bookingTimeUtils.toBusinessIsoString(bookingTimeUtils.getBookingStartAt(bookingDate, bookingTime))
 );
 
 const toRestaurantSummary = (restaurant) => ({

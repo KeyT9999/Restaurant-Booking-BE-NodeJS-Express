@@ -2,6 +2,7 @@
 
 const Booking = require('../models/Booking');
 const notificationService = require('../services/notification.service');
+const { getBusinessDateKey, normalizeBusinessDate } = require('../utils/booking-time');
 
 let isRunning = false;
 
@@ -18,13 +19,12 @@ const bookingReminder = async (io) => {
   isRunning = true;
 
   try {
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
-    const tomorrow = new Date(today.getTime() + 2 * 24 * 60 * 60 * 1000);
+    const today = normalizeBusinessDate(getBusinessDateKey());
+    const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
 
     const filter = {
       status: { $in: ['pending', 'confirmed'] },
-      bookingDate: { $gte: today, $lte: tomorrow },
+      bookingDate: tomorrow,
       reminderSent: false,
     };
 

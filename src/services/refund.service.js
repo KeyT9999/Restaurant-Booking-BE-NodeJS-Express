@@ -3,6 +3,7 @@
 const Refund = require('../models/Refund');
 const Booking = require('../models/Booking');
 const Payment = require('../models/Payment');
+const { getBookingStartAt } = require('../utils/booking-time');
 
 /**
  * Calculate refund amount based on cancellation policy.
@@ -27,12 +28,7 @@ const calculateRefund = (booking, policy, cancelledByRole = 'customer') => {
 
   // Customer-initiated cancellation — apply time-based policy
   const now = new Date();
-  const bookingDateTime = (() => {
-    const d = new Date(booking.bookingDate);
-    const [h, m] = (booking.bookingTime || '00:00').split(':');
-    d.setHours(parseInt(h, 10), parseInt(m, 10), 0, 0);
-    return d;
-  })();
+  const bookingDateTime = getBookingStartAt(booking);
 
   const hoursUntilBooking = (bookingDateTime.getTime() - now.getTime()) / (1000 * 60 * 60);
 

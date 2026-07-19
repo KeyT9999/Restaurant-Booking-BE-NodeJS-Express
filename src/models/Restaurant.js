@@ -74,11 +74,11 @@ const restaurantSchema = new mongoose.Schema(
       type: {
         type: String,
         enum: ['Point'],
-        default: 'Point',
+        default: undefined,
       },
       coordinates: {
         type: [Number], // [longitude, latitude] - GeoJSON format
-        default: null,
+        default: undefined,
       },
     },
 
@@ -226,6 +226,16 @@ const restaurantSchema = new mongoose.Schema(
       type: Number,
       default: 0,
       min: [0, 'Số dư không thể âm'],
+    },
+    availableBalance: {
+      type: Number,
+      default: null,
+      min: [0, 'Số dư khả dụng không thể âm'],
+    },
+    pendingWithdrawalBalance: {
+      type: Number,
+      default: 0,
+      min: [0, 'Số dư đang chờ rút không thể âm'],
     },
     totalRevenue: {
       type: Number,
@@ -420,6 +430,8 @@ restaurantSchema.methods.toAdminJSON = function () {
     deletedBy: this.deletedBy,
     deleteReason: this.deleteReason,
     balance: this.balance,
+    availableBalance: this.availableBalance ?? this.balance,
+    pendingWithdrawalBalance: this.pendingWithdrawalBalance || 0,
     totalRevenue: this.totalRevenue,
     totalCommission: this.totalCommission,
     commissionRate: this.commissionRate,
