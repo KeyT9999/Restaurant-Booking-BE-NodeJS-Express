@@ -61,6 +61,25 @@ const paymentSchema = new mongoose.Schema(
       default: 0,
       min: [0, 'Số tiền trước giảm giá không thể âm'],
     },
+    walletAmountApplied: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    gatewayAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    walletTransactionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'WalletTransaction',
+      default: null,
+    },
+    walletReleasedAt: {
+      type: Date,
+      default: null,
+    },
 
     // ─── Trạng thái ───
     status: {

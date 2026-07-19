@@ -15,7 +15,4 @@ router.get('/summary', restrictTo('customer'), loyaltyController.getLoyaltySumma
 // Tính toán thử số xu áp dụng cho mức cọc
 router.get('/preview', restrictTo('customer'), loyaltyController.previewRedemption);
 
-// API ẩn phục vụ giả lập/kiểm thử tích xu
-router.post('/simulate', restrictTo('customer'), loyaltyController.simulateEarnCoins);
-
 module.exports = router;

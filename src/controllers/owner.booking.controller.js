@@ -10,6 +10,10 @@ const bookingService = require('../services/booking.service');
 const emailService = require('../services/email.service');
 const notificationService = require('../services/notification.service');
 const bookingCommissionService = require('../services/booking-commission.service');
+const {
+  BookingCancellationError,
+  cancelBookingToWallet,
+} = require('../services/booking-cancellation.service');
 
 const emitBookingEvent = (io, room, event, payload) => {
   if (!io) return;
@@ -252,7 +256,7 @@ const confirmBooking = async (req, res) => {
 /**
  * D. Hủy Đặt Bàn (PUT /api/v1/owner/bookings/:id/cancel)
  */
-const cancelBooking = async (req, res) => {
+const cancelBookingLegacy = async (req, res) => {
   try {
     const booking = req.booking;
     const { reason } = req.body;
@@ -357,6 +361,77 @@ const cancelBooking = async (req, res) => {
 /**
  * E. Hoàn Thành Đặt Bàn (PUT /api/v1/owner/bookings/:id/complete)
  */
+const cancelBooking = async (req, res) => {
+  try {
+    const reason = req.body.reason?.trim();
+    if (!reason) return res.status(400).json({ success: false, message: 'Vui lòng cung cấp lý do hủy đặt bàn' });
+
+    const result = await cancelBookingToWallet({
+      bookingId: req.booking._id,
+      customerId: req.booking.customerId,
+      actorId: req.user._id,
+      cancelledBy: 'restaurant',
+      waiveCancellationFee: true,
+      reason,
+    });
+    const booking = result.booking;
+
+    if (!result.alreadyProcessed) {
+      bookingService.releaseTableReservations(booking._id).catch(() => {});
+      if (booking.voucherId) {
+        const voucherService = require('../services/voucher.service');
+        voucherService.reverseRedemption(booking._id, reason, req.user)
+          .catch((error) => console.warn(`[OwnerCancel/voucher] ${error.message}`));
+      }
+      logActivity(booking.restaurantId, 'booking_cancelled', req.user._id, req.user.role, reason, {
+        bookingId: booking._id,
+        customerName: booking.customerName,
+        refundAmount: result.refundAmount,
+        refundMethod: result.refundMethod,
+      });
+      bookingCommissionService.markCancelledForBooking(booking._id, `Nhà hàng hủy booking: ${reason}`)
+        .catch((error) => console.warn(`[BookingCommission/cancelled] ${error.message}`));
+
+      const io = req.app.get('io');
+      emitBookingEvent(io, `user:${booking.customerId.toString()}`, 'booking:cancelled', {
+        bookingId: booking._id,
+        restaurantId: booking.restaurantId,
+        status: booking.status,
+        cancelledBy: 'restaurant',
+        reason,
+        refundAmount: result.refundAmount,
+        walletBalance: result.walletBalance,
+      });
+      sendNotification(notificationService.notifyBookingStatusChanged(io, {
+        booking,
+        restaurant: req.restaurant,
+        status: 'cancelled',
+        reason: `${reason}. Hoàn 100% ${result.refundAmount.toLocaleString('vi-VN')}đ vào Ví BookEat; số dư ví: ${result.walletBalance.toLocaleString('vi-VN')}đ.`,
+        actorRole: 'restaurant_owner',
+      }), 'cancelled');
+      sendBookingEmail(emailService.sendBookingCancelledEmail(booking.customerId, req.restaurant, booking, reason), 'cancelled');
+    }
+
+    return res.json({
+      success: true,
+      message: 'Hủy đặt bàn thành công; tiền cọc thực trả đã được hoàn 100% vào Ví BookEat.',
+      data: {
+        ...booking.toAdminJSON(),
+        refundAmount: result.refundAmount,
+        walletBalance: result.walletBalance,
+        walletTransactionId: result.walletTransaction?._id || null,
+        alreadyProcessed: result.alreadyProcessed,
+      },
+    });
+  } catch (error) {
+    if (error instanceof BookingCancellationError) {
+      return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message, details: error.details });
+    }
+    console.error('[OwnerCancelBooking] Error:', error);
+    return res.status(500).json({ success: false, message: 'Lỗi máy chủ khi hủy đặt bàn' });
+  }
+};
+
 const completeBooking = async (req, res) => {
   try {
     const booking = req.booking;

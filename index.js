@@ -109,6 +109,7 @@ apiRouter.use('/refunds',     require('./src/routes/refund.routes'));
 apiRouter.use('/vouchers',    require('./src/routes/voucher.routes'));
 apiRouter.use('/reviews',     require('./src/routes/review.routes'));
 apiRouter.use('/loyalty',     require('./src/routes/loyalty.routes'));
+apiRouter.use('/wallet',      require('./src/routes/wallet.routes'));
 apiRouter.use('/notifications', require('./src/routes/notification.routes'));
 apiRouter.use('/customer/favorites', require('./src/routes/customer.favorite.routes'));
 apiRouter.use('/recommendations', require('./src/routes/recommendation.routes'));

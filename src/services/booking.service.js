@@ -562,9 +562,6 @@ const releaseHolds = async ({ userId, sessionId, restaurantId, bookingDate, book
   await TableHold.deleteMany(filter);
 };
 
-/**
- * Get currently held table numbers (used by availability check to exclude held tables).
- */
 const getHeldTableNumbers = async ({ restaurantId, bookingDate, bookingTime, excludeUserId, excludeSessionId }) => {
   const activeHolds = await TableHold.find({
     restaurantId,
@@ -583,6 +580,123 @@ const getHeldTableNumbers = async ({ restaurantId, bookingDate, bookingTime, exc
   });
 
   return [...heldTables];
+};
+
+/**
+ * Xử lý một đặt bàn đã quá hạn (Auto-complete hoặc Auto-no-show).
+ * Đảm bảo atomic update trạng thái bằng findOneAndUpdate để chống race condition.
+ */
+const processExpiredBooking = async (bookingId, now, io = null) => {
+  const notificationService = require('./notification.service');
+  const bookingCommissionService = require('./booking-commission.service');
+
+  // 1. Đọc document hiện tại để kiểm tra checkedInAt và status
+  const checkBooking = await Booking.findById(bookingId);
+  if (!checkBooking || checkBooking.status !== 'confirmed') {
+    return { success: false, reason: 'Booking không tồn tại hoặc không ở trạng thái confirmed' };
+  }
+
+  // Kiểm tra thời gian kết thúc của booking
+  const bookingDateTime = combineDateAndTime(checkBooking.bookingDate, checkBooking.bookingTime || '00:00');
+  const bookingEndTime = new Date(bookingDateTime.getTime() + BOOKING_CONSTANTS.BOOKING_DURATION_HOURS * 60 * 60 * 1000);
+  if (bookingEndTime > now) {
+    return { success: false, reason: 'Booking chưa quá hạn' };
+  }
+
+  const targetStatus = checkBooking.checkedInAt ? 'completed' : 'no_show';
+
+  // 2. Thực hiện atomic update trạng thái để đảm bảo không ai khác cập nhật cùng lúc
+  const booking = await Booking.findOneAndUpdate(
+    {
+      _id: bookingId,
+      status: 'confirmed' // Điều kiện lock: trạng thái vẫn phải là confirmed
+    },
+    {
+      $set: {
+        status: targetStatus,
+        completedAt: targetStatus === 'completed' ? now : null
+      },
+      $push: {
+        statusHistory: {
+          status: targetStatus,
+          changedBy: null,
+          note: targetStatus === 'completed' 
+            ? 'Tự động hoàn tất sau giờ đặt (khách đã check-in)' 
+            : 'Tự động đánh dấu vắng mặt (quá giờ đặt bàn + 2h, chưa check-in)',
+          changedAt: now
+        }
+      }
+    },
+    { new: true } // Trả về document sau khi update
+  );
+
+  if (!booking) {
+    return { success: false, reason: 'Race condition xảy ra hoặc trạng thái đã thay đổi' };
+  }
+
+  // 3. Giải phóng bàn ăn
+  await releaseTableReservations(booking._id).catch(() => {});
+
+  const restaurant = await Restaurant.findById(booking.restaurantId);
+
+  // 4. Thực hiện các side effects cụ thể cho từng trạng thái
+  if (targetStatus === 'completed') {
+    // Để pre('save') nhận biết trạng thái thay đổi, ta gán cờ _becameCompleted = true
+    booking._becameCompleted = true;
+    await booking.save(); 
+
+    // Cập nhật statistics cho nhà hàng
+    if (restaurant) {
+      restaurant.stats.completedBookings = (restaurant.stats.completedBookings || 0) + 1;
+      await restaurant.save().catch(() => {});
+    }
+
+    // Tạo commission ledger
+    await bookingCommissionService.createLedgerForBooking(booking._id, {
+      booking,
+      restaurant,
+      source: booking.sourceAiPendingActionId ? 'ai_booking_completed' : 'owner_booking_completed',
+    }).catch((err) => console.warn(`[BookingCommission] ${err.message}`));
+
+  } else {
+    // Trạng thái no_show
+    await booking.save(); // Để đồng bộ Mongoose
+
+    // Phạt người dùng no-show
+    if (booking.customerId) {
+      const customer = await User.findById(booking.customerId);
+      if (customer) {
+        customer.noShowCounter = (customer.noShowCounter || 0) + 1;
+        if (customer.noShowCounter >= 3) {
+          customer.bookingBlockedUntil = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+        }
+        await customer.save();
+      }
+    }
+  }
+
+  // 5. Gửi thông báo (Real-time Socket & Notifications)
+  if (io) {
+    const room = `user:${booking.customerId.toString()}`;
+    const event = `booking:${targetStatus}`;
+    io.to(room).emit(event, {
+      bookingId: booking._id,
+      restaurantId: booking.restaurantId,
+      status: booking.status,
+      message: targetStatus === 'completed' ? 'Đặt bàn đã hoàn tất' : 'Đặt bàn được đánh dấu no-show',
+    });
+
+    notificationService.notifyBookingStatusChanged(io, {
+      booking,
+      restaurant,
+      status: targetStatus,
+      actorRole: 'system',
+    }).catch((error) => {
+      console.warn(`[Notification Expired Booking] ${error.message}`);
+    });
+  }
+
+  return { success: true, status: targetStatus };
 };
 
 module.exports = {
@@ -605,4 +719,5 @@ module.exports = {
   holdTables,
   releaseHolds,
   getHeldTableNumbers,
+  processExpiredBooking,
 };

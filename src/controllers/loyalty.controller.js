@@ -70,59 +70,7 @@ const previewRedemption = async (req, res) => {
   }
 };
 
-/**
- * API Giả lập Tích xu (Dành cho việc Test/Học hỏi tích hợp dạng ẩn)
- */
-const simulateEarnCoins = async (req, res) => {
-  try {
-    const userId = req.user._id;
-    const { amount, source } = req.body;
-
-    const coins = Number(amount);
-    if (isNaN(coins) || coins <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Số xu giả lập không hợp lệ',
-      });
-    }
-
-    let type = 'earn_completed';
-    let description = `Giả lập: Tích lũy ${coins} Coins từ đơn đặt bàn hoàn tất`;
-    if (source === 'deposit') {
-      type = 'earn_deposit';
-      description = `Giả lập: Tích lũy ${coins} Coins từ đặt cọc thành công`;
-    }
-
-    const transaction = await loyaltyService.addCoins(
-      userId,
-      coins,
-      type,
-      null,
-      description
-    );
-
-    return res.json({
-      success: true,
-      message: `Giả lập thành công: Cộng ${coins} Coins vào ví của bạn`,
-      data: {
-        transaction,
-        updatedUser: {
-          loyaltyPoints: req.user.loyaltyPoints + coins,
-          totalPointsEarned: req.user.totalPointsEarned + coins,
-        },
-      },
-    });
-  } catch (error) {
-    console.error('❌ [SimulateEarnCoins] Lỗi:', error.message);
-    return res.status(500).json({
-      success: false,
-      message: 'Lỗi máy chủ khi giả lập tích xu',
-    });
-  }
-};
-
 module.exports = {
   getLoyaltySummary,
   previewRedemption,
-  simulateEarnCoins,
 };

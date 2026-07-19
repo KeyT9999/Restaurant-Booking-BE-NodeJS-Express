@@ -9,6 +9,15 @@ const LoyaltyTransaction = require('../models/LoyaltyTransaction');
 const addCoins = async (userId, amount, type, referenceId, description, expiryMonths = 6) => {
   if (amount <= 0) return null;
 
+  // Chống cộng xu trùng lặp (Idempotency Check)
+  if (referenceId && type) {
+    const existing = await LoyaltyTransaction.findOne({ referenceId, type });
+    if (existing) {
+      console.log(`[Loyalty] Giao dịch tích xu đã tồn tại cho referenceId=${referenceId}, type=${type}. Bỏ qua cộng trùng.`);
+      return existing;
+    }
+  }
+
   const user = await User.findById(userId);
   if (!user) throw new Error('Người dùng không tồn tại');
 

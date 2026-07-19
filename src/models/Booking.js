@@ -107,6 +107,48 @@ const bookingSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    cancellationPolicyCode: {
+      type: String,
+      enum: ['FULL_REFUND', 'PARTIAL_REFUND', 'CANCELLATION_CLOSED', null],
+      default: null,
+    },
+    cancellationFeeRateBasisPoints: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 10000,
+    },
+    cancellationPaidAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    cancellationFeeAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    refundAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    refundMethod: {
+      type: String,
+      enum: ['bookeat_wallet', 'bank_transfer', null],
+      default: null,
+    },
+    refundStatus: {
+      type: String,
+      enum: ['not_applicable', 'completed', 'pending', 'failed', null],
+      default: null,
+    },
+    walletTransactionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'WalletTransaction',
+      default: null,
+      index: true,
+    },
 
     // ─── Payment ───
     depositAmount: {
@@ -283,8 +325,11 @@ bookingSchema.virtual('isPast').get(function () {
 bookingSchema.methods.canCancel = function () {
   // Can cancel if status is pending or confirmed and booking is in the future
   const now = new Date();
-  const bookingDateTime = new Date(this.bookingDate);
-  return ['pending', 'confirmed'].includes(this.status) && bookingDateTime > now;
+  // Combine bookingDate and bookingTime for accurate comparison
+  const d = new Date(this.bookingDate);
+  const [h, m] = (this.bookingTime || '00:00').split(':').map(Number);
+  d.setUTCHours(h, m, 0, 0);
+  return ['pending', 'confirmed'].includes(this.status) && d > now;
 };
 
 // ─── Method: Can Complete ───
@@ -309,6 +354,18 @@ bookingSchema.methods.toPublicJSON = function () {
     status: this.status,
     depositAmount: this.depositAmount,
     depositPaid: this.depositPaid,
+    depositPaidAt: this.depositPaidAt,
+    cancellationReason: this.cancellationReason,
+    cancelledBy: this.cancelledBy,
+    cancelledAt: this.cancelledAt,
+    cancellationPolicyCode: this.cancellationPolicyCode,
+    cancellationFeeRateBasisPoints: this.cancellationFeeRateBasisPoints,
+    cancellationPaidAmount: this.cancellationPaidAmount,
+    cancellationFeeAmount: this.cancellationFeeAmount,
+    refundAmount: this.refundAmount,
+    refundMethod: this.refundMethod,
+    refundStatus: this.refundStatus,
+    walletTransactionId: this.walletTransactionId,
     voucherCode: this.voucherCode,
     voucherId: this.voucherId,
     discountAmount: this.discountAmount,
@@ -344,6 +401,14 @@ bookingSchema.methods.toAdminJSON = function () {
     cancellationReason: this.cancellationReason,
     cancelledBy: this.cancelledBy,
     cancelledAt: this.cancelledAt,
+    cancellationPolicyCode: this.cancellationPolicyCode,
+    cancellationFeeRateBasisPoints: this.cancellationFeeRateBasisPoints,
+    cancellationPaidAmount: this.cancellationPaidAmount,
+    cancellationFeeAmount: this.cancellationFeeAmount,
+    refundAmount: this.refundAmount,
+    refundMethod: this.refundMethod,
+    refundStatus: this.refundStatus,
+    walletTransactionId: this.walletTransactionId,
     depositAmount: this.depositAmount,
     depositPaid: this.depositPaid,
     depositPaidAt: this.depositPaidAt,

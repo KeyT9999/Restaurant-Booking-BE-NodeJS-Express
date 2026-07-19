@@ -8,6 +8,7 @@
     "dev": "nodemon index.js",
     "start": "node index.js",
     "recommendations:rebuild": "node scripts/rebuild-recommendation-dataset.js",
+    "migrate:booking-wallet": "node scripts/migrate-booking-wallet-cancellation.js",
     "seed:qa-recommendation": "node scripts/seed-qa-recommendation.js",
     "seed:recommendation-smoke": "node scripts/seed-recommendation-smoke-db.js"
   },
