@@ -163,7 +163,8 @@ const confirmBooking = async (req, res) => {
     const capacityValidation = await bookingService.validateTableCapacity(
       booking.tableNumbers,
       booking.numberOfGuests,
-      booking.restaurantId
+      booking.restaurantId,
+      { enforceMaxLimit: false }
     );
     if (!capacityValidation.valid) {
       return res.status(400).json({
@@ -621,7 +622,8 @@ const changeTable = async (req, res) => {
     const capacityValidation = await bookingService.validateTableCapacity(
       newTableNumbers,
       booking.numberOfGuests,
-      booking.restaurantId
+      booking.restaurantId,
+      { enforceMaxLimit: false }
     );
     if (!capacityValidation.valid) {
       return res.status(400).json({

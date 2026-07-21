@@ -220,7 +220,7 @@ const sanitizePublicRestaurantFallbackItem = (item) => ({
   priceRange: item.priceRange || null,
   cuisineTypes: item.cuisineTypes || (item.cuisineType ? [item.cuisineType] : []),
   score: null,
-  reasons: ['Pho bien tren BookEat'],
+  reasons: ['Phổ biến trên BookEat'],
   metadata: {
     restaurantId: item.id,
     available: true,
@@ -253,18 +253,18 @@ const sanitizeMenuItem = (item) => ({
 
 const buildAssistantMessage = ({ fallbackUsed, requestType }) => {
   if (fallbackUsed) {
-    return 'Minh chua co du du lieu ca nhan hoa, nen goi y cac lua chon pho bien hoac phu hop hien tai.';
+    return 'Mình chưa có đủ dữ liệu cá nhân hóa, nên gợi ý các lựa chọn phổ biến hoặc phù hợp hiện tại.';
   }
 
   if (requestType === 'menu_item') {
-    return 'Duoi day la mot so mon phu hop voi ban.';
+    return 'Dưới đây là một số món phù hợp với bạn.';
   }
 
   if (requestType === 'mixed') {
-    return 'Duoi day la mot so goi y nha hang va mon phu hop voi ban.';
+    return 'Dưới đây là một số gợi ý nhà hàng và món phù hợp với bạn.';
   }
 
-  return 'Duoi day la mot so goi y phu hop voi ban.';
+  return 'Dưới đây là một số gợi ý phù hợp với bạn.';
 };
 
 const logRecommendationToolResult = ({

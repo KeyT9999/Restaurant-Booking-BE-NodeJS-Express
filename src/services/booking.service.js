@@ -49,7 +49,7 @@ const combineDateAndTime = bookingTimeUtils.combineBusinessDateAndTime;
  */
 const checkTimeConflict = async (restaurantId, tableNumber, bookingDate, bookingTime, excludeBookingId = null) => {
   const normalizedDate = normalizeDate(bookingDate);
-  
+
   // Find all active bookings for this restaurant, table, and date
   const bookings = await Booking.find({
     restaurantId,
@@ -66,7 +66,7 @@ const checkTimeConflict = async (restaurantId, tableNumber, bookingDate, booking
 
   for (const b of bookings) {
     const existingStart = combineDateAndTime(b.bookingDate, b.bookingTime);
-    
+
     // Existing occupied interval: [existingStart - BUFFER_BEFORE, existingStart + DURATION + BUFFER_AFTER]
     const occupiedStart = new Date(existingStart.getTime() - BOOKING_CONSTANTS.BUFFER_BEFORE_MINUTES * 60 * 1000);
     const occupiedEnd = new Date(existingStart.getTime() + (BOOKING_CONSTANTS.BOOKING_DURATION_HOURS * 60 + BOOKING_CONSTANTS.BUFFER_AFTER_MINUTES) * 60 * 1000);
@@ -89,9 +89,9 @@ const checkTimeConflict = async (restaurantId, tableNumber, bookingDate, booking
 const validateBookingTime = async (bookingDate, bookingTime, restaurant) => {
   const errors = [];
   const now = new Date();
-  
+
   const proposedDateTime = combineDateAndTime(bookingDate, bookingTime);
-  
+
   // 1. Check if booking is in the past
   if (proposedDateTime <= now) {
     errors.push('Thời gian đặt bàn phải ở tương lai');
@@ -113,7 +113,7 @@ const validateBookingTime = async (bookingDate, bookingTime, restaurant) => {
   // 4. Validate against operating hours
   const daysOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
   const dayName = bookingTimeUtils.getBusinessWeekday(bookingDate);
-  
+
   const hours = restaurant.operatingHours?.[dayName] || {
     open: BOOKING_CONSTANTS.DEFAULT_OPEN_TIME,
     close: BOOKING_CONSTANTS.DEFAULT_CLOSE_TIME,
@@ -186,9 +186,10 @@ const validateBookingTime = async (bookingDate, bookingTime, restaurant) => {
 /**
  * Checks table capacities and active status.
  */
-const validateTableCapacity = async (tableNumbers, numberOfGuests, restaurantId) => {
+const validateTableCapacity = async (tableNumbers, numberOfGuests, restaurantId, options = {}) => {
+  const { enforceMaxLimit = true } = options;
   const errors = [];
-  
+
   if (!tableNumbers || tableNumbers.length === 0) {
     return { valid: true, errors, tables: [] };
   }
@@ -216,6 +217,17 @@ const validateTableCapacity = async (tableNumbers, numberOfGuests, restaurantId)
 
   if (totalCapacity < numberOfGuests) {
     errors.push(`Tổng sức chứa của các bàn được chọn (${totalCapacity} chỗ) không đủ cho số khách (${numberOfGuests} người)`);
+  }
+
+  if (enforceMaxLimit && totalCapacity > numberOfGuests + 2) {
+    errors.push(`Tổng sức chứa của các bàn được chọn (${totalCapacity} chỗ) vượt quá giới hạn tối đa cho phép cho ${numberOfGuests} khách (${numberOfGuests + 2} chỗ)`);
+  }
+
+  if (enforceMaxLimit && tables.length > 1) {
+    const hasSufficientSingleTable = tables.some(t => t.capacity >= numberOfGuests);
+    if (hasSufficientSingleTable) {
+      errors.push(`Không thể chọn nhiều bàn khi đã có bàn đơn lẻ đủ sức chứa cho ${numberOfGuests} khách`);
+    }
   }
 
   return {
@@ -315,30 +327,32 @@ const getAvailableTables = async (
  * Suggests best fitting table(s) based on capacity and zone.
  */
 const suggestTables = (availableTables, numberOfGuests) => {
+  const maxCapacity = numberOfGuests + 2;
   // Sort available tables by capacity in ascending order
   const sortedTables = [...availableTables].sort((a, b) => a.capacity - b.capacity);
 
-  // 1. Try to find a single table that fits the guest count with minimal waste
-  const singleTable = sortedTables.find(t => t.capacity >= numberOfGuests);
+
+  const singleTable = sortedTables.find(t => t.capacity >= numberOfGuests && t.capacity <= maxCapacity);
   if (singleTable) {
     return [singleTable];
   }
 
-  // 2. If no single table is big enough, try to suggest a combination of tables
-  // For simplicity, we can sort by capacity descending and keep picking until capacity met
+
   const combo = [];
   let currentCapacity = 0;
-  
+
   const descTables = [...sortedTables].reverse();
   for (const table of descTables) {
-    combo.push(table);
-    currentCapacity += table.capacity;
-    if (currentCapacity >= numberOfGuests) {
-      return combo;
+    if (currentCapacity + table.capacity <= maxCapacity) {
+      combo.push(table);
+      currentCapacity += table.capacity;
+      if (currentCapacity >= numberOfGuests) {
+        return combo;
+      }
     }
   }
 
-  return []; // Return empty if even all tables combined cannot host the guests
+  return []; // Return empty if even all tables combined cannot host the guests within the limit
 };
 
 /**
@@ -347,21 +361,28 @@ const suggestTables = (availableTables, numberOfGuests) => {
 const checkAvailability = async (restaurantId, bookingDate, bookingTime, numberOfGuests, excludeUserId, excludeSessionId) => {
   const availableTables = await getAvailableTables(restaurantId, bookingDate, bookingTime, excludeUserId, excludeSessionId);
   const suggestedTables = suggestTables(availableTables, numberOfGuests);
-  
+
   const totalAvailableCapacity = availableTables.reduce((sum, t) => sum + t.capacity, 0);
   const isAvailable = totalAvailableCapacity >= numberOfGuests && suggestedTables.length > 0;
+
+  const allRestaurantTables = await RestaurantTable.find({
+    restaurantId,
+    isActive: true,
+    status: { $nin: ['inactive', 'maintenance'] },
+  });
+  const maxPossibleCapacity = allRestaurantTables.reduce((sum, t) => sum + t.capacity, 0);
+  const isCapacityPhysicallySufficient = maxPossibleCapacity >= numberOfGuests;
 
   return {
     available: isAvailable,
     availableTables,
     suggestedTables,
+    insufficientTotalCapacity: !isCapacityPhysicallySufficient,
     conflicts: !isAvailable ? ['Không đủ bàn trống phù hợp cho số khách được yêu cầu'] : [],
   };
 };
 
-/**
- * Helper to add status change history to a booking.
- */
+
 const addStatusHistory = async (booking, newStatus, changedBy, note = null) => {
   booking.status = newStatus;
   booking.statusHistory.push({
@@ -370,7 +391,7 @@ const addStatusHistory = async (booking, newStatus, changedBy, note = null) => {
     note,
     changedAt: new Date(),
   });
-  
+
   return booking.save();
 };
 
@@ -831,7 +852,7 @@ const processExpiredBooking = async (bookingId, now = new Date(), io = null, opt
   // 3. Giải phóng bàn ăn
   // Resolve through exports so tests and operational wrappers can replace the
   // reservation cleanup dependency without changing lifecycle semantics.
-  await module.exports.releaseTableReservations(booking._id).catch(() => {});
+  await module.exports.releaseTableReservations(booking._id).catch(() => { });
 
   const restaurant = await Restaurant.findById(booking.restaurantId);
 
@@ -839,12 +860,12 @@ const processExpiredBooking = async (bookingId, now = new Date(), io = null, opt
   if (targetStatus === 'completed') {
     // Để pre('save') nhận biết trạng thái thay đổi, ta gán cờ _becameCompleted = true
     booking._becameCompleted = true;
-    await booking.save(); 
+    await booking.save();
 
     // Cập nhật statistics cho nhà hàng
     if (restaurant) {
       restaurant.stats.completedBookings = (restaurant.stats.completedBookings || 0) + 1;
-      await restaurant.save().catch(() => {});
+      await restaurant.save().catch(() => { });
     }
 
     // Tạo commission ledger
