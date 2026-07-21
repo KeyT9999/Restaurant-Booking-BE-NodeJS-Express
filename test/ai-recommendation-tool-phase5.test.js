@@ -221,7 +221,10 @@ test('phase 5 mixed personalized tool merges and sorts restaurant and menu items
   assert.equal(result.payload.items.length, 2);
   assert.equal(result.payload.items[0].itemType, 'menu_item');
   assert.equal(result.payload.items[1].itemType, 'restaurant');
-  assert.match(result.payload.message, /du du lieu ca nhan hoa/i);
+  assert.equal(
+    result.payload.message,
+    'Mình chưa có đủ dữ liệu cá nhân hóa, nên gợi ý các lựa chọn phổ biến hoặc phù hợp hiện tại.',
+  );
 });
 
 test('phase 5 runner returns safe invalid-request message for unsupported recommendation type', async () => {
